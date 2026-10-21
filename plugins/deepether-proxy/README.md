@@ -146,7 +146,7 @@ token 过期时（上游返回 `40003 INVALID_TOKEN`），状态命令会显示�
 
 - 被限流/封号时不需要你手动做什么：插件会静默降级并在 `/deepether-status` 的「反封禁节奏」段落里显示原因与剩余时间。
 - 已封号 3 天这种场景：先把 `behavior.mode` 设成 `official_only` 让机制性重试停下来，解封后把 `max_per_day` 从 50 起爬坡。
-- 完整设计与"为什么不做的那些手段"（代理池、随机 UA、伪造 cookie…）见仓库 `docs/ANTIBAN.md`。
+- 完整设计与"为什么不做的那些手段"（代理池、随机 UA、伪造 cookie…）见 [docs/ANTIBAN.md](../../docs/ANTIBAN.md)。
 
 ## 配置要点
 
@@ -161,6 +161,16 @@ token 过期时（上游返回 `40003 INVALID_TOKEN`），状态命令会显示�
 | `antiban.*` | 反封禁节奏（见上一节）；WebUI 有独立「反封禁」页签 |
 | `debug.dump_request` | 把 Host 原始请求落盘，用于固化契约测试样本 |
 | `debug.dump_response` | 把上游原始 SSE 落盘，用于排查协议漂移 |
+
+## 相关文档
+
+| 文档 | 内容 |
+|---|---|
+| [docs/FEASIBILITY.md](../../docs/FEASIBILITY.md) | 可行性分析：为什么只接 replyer/utils、工具调用缺口、架构取舍 |
+| [docs/ANTIBAN.md](../../docs/ANTIBAN.md) | 反封禁设计：分层模型、措施矩阵、默认值依据、实现落点 |
+| [docs/P2-ACCEPTANCE.md](../../docs/P2-ACCEPTANCE.md) | P2 稳定性验收演练报告 |
+| [docs/upstream-protocol.md](docs/upstream-protocol.md) | 网页版协议实测记录（PoW / SSE 混合帧 / session 路径） |
+| [CHANGELOG.md](CHANGELOG.md) | 版本更新记录 |
 
 ## 上游改版排查 5 步
 

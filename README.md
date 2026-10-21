@@ -13,7 +13,7 @@
 
 ## 快速开始
 
-1. 从 [Releases](https://github.com/Eetherrr/DeepEtherProxy/releases/latest) 下载 `deepether-proxy-0.2.4.zip`
+1. 从 [Releases](https://github.com/Eetherrr/DeepEtherProxy/releases/latest) 下载最新版 `deepether-proxy-<version>.zip`
 2. MaiBot WebUI → 插件页 → 上传 zip 安装 → **重启一次 MaiBot**
 3. WebUI → 插件 → DeepEther Proxy → 凭证，填入网页版 token：
 
