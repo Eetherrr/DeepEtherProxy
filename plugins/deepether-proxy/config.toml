@@ -1,0 +1,64 @@
+[plugin]
+enabled = true
+config_version = "0.1.0"
+
+[provision]
+# 插件加载时自动把 Provider 与三个预设模型写进 Host 的 config/model_config.toml，
+# 并接线到 replyer/planner/utils。Host 会热重载该文件，无需重启；写入前自动备份。
+enabled = true
+provider_name = "deepether"
+model_config_path = ""
+wire_tasks = "replyer,utils"
+selection_strategy = "sequential"
+keep_backup = true
+
+[credential]
+# 发布用模板：留空。请在 WebUI 插件配置里填入自己的网页版 token（chat.deepseek.com 控制台
+# 执行 copy(JSON.parse(localStorage.getItem('userToken')).value) 获取），不要把真实 token 提交进仓库。
+web_token = ""
+loopback_enabled = false
+credential_port = 18765
+allowed_origin = "https://chat.deepseek.com"
+health_check_interval_min = 30
+
+[behavior]
+mode = "web_first"
+thinking_enabled = true
+search_enabled = false
+model_type = "default"
+request_timeout_sec = 180
+max_history_chars = 60000
+response_protocol = "legacy"
+prompt_style = "plain"
+
+[concurrency]
+max_concurrency = 2
+queue_wait_sec = 8
+circuit_fail_threshold = 3
+circuit_cooldown_sec = 60
+
+[fallback]
+fallback_enabled = true
+fallback_model_name = "deepseek-v4-flash"
+fallback_timeout_ms = 120000
+fallback_with_tools = true
+fallback_for_models = []
+
+[antiban]
+enabled = true
+min_interval_sec = 8.0
+max_interval_sec = 20.0
+jitter_ratio = 0.25
+max_per_minute = 3
+max_per_hour = 30
+max_per_day = 200
+cooldown_on_rate_limit_sec = 900
+cooldown_on_ban_sec = 21600
+adaptive_backoff = true
+session_reuse_calls = 8
+persist_state = true
+
+[debug]
+dump_request = false
+dump_response = false
+verbose_log = false

@@ -1,0 +1,85 @@
+{
+  "item_schema_version": 1,
+  "extra_params": {
+    "deepether_style": "plain",
+    "deepether_thinking": false
+  },
+  "max_tokens": 8192,
+  "context_items": [
+    {
+      "item_type": "UserMessageItem",
+      "meta": {
+        "item_id": "8205263ae9b74ea5988e16fdb45c99a6",
+        "logical_turn_id": null,
+        "timestamp": "2026-10-20T21:50:01.914027"
+      },
+      "parts": [
+        {
+          "type": "text",
+          "text": "你要从用户原始发言中提取“关于本地操作员的稳定事实”。\n\n目标人物：本地操作员\n用户原始发言证据：\n目标用户原始发言（事实值必须来自这里）：\n- [消息ID: bot_console_6d62a8af24b64da0b0288bb0016b5c49] 麦麦，给我讲讲你今天的心情吧\n\n邻近上下文（只用于理解省略、追问和指代，不能单独作为事实来源）：\n- 麦麦: DeepEther Proxy v0.1.0 状态\n通道策略：web_first｜思考：开｜联网：关\n运行时长：4 秒\n\n【凭证】\n状态：已就绪\n来源：bookmarklet｜更新于：2026-10-20T14:15:12\n指纹：fake…(51 字符)\n\n【凭证接收服务】\n状态：监听中｜端口：18765（仅 127.0.0.1）\n口令 nonce：<nonce>\n\n【书签小工具】\n把下面这一行整行复制成书签，在已登录的 chat.deepseek.com 页面上点一下即可完成授权：\njavascript:(async()=>{try{var raw=localStorage.getItem('userToken');var tok=raw?((JSON.parse(raw)||{}).value||raw):'';if(!tok){alert('DeepEther Proxy：没有在本地存储里找到 userToken，请先确认已登录 chat.deepseek.com');return}var resp=await fetch('http://127.0.0.1:18765/credential/claim',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({nonce:\"<nonce>\",token:tok})});if(!resp.ok){throw new Error(await resp.text())}alert('DeepEther Proxy：凭证已送达，可以关闭本页')}catch(err){var raw2=localStorage.getItem('userToken');var tok2=raw2?((JSON.parse(raw2)||{}).value||raw2):'';prompt('DeepEther Proxy：自动送达失败（'+err+'）。请复制下面的 token，粘贴到插件配置 credential.web_token：',tok2)}})()\n\n【统计】\n网页版成功：0 次｜失败：0 次｜降级：0 次\n平均耗时：暂无数据\n最近探活：尚未执行\n- 本地操作员: /deepether-status\n- 麦麦: DeepEther Proxy v0.1.0 状态\n通道策略：web_first｜思考：开｜联网：关\n运行时长：5 秒\n\n【凭证】\n状态：未配置（等待书签送达）\n来源：无｜更新于：无\n指纹：(空)\n\n【凭证接收服务】\n状态：监听中｜端口：18765（仅 127.0.0.1）\n口令 nonce：<nonce>\n\n【书签小工具】\n把下面这一行整行复制成书签，在已登录的 chat.deepseek.com 页面上点一下即可完成授权：\njavascript:(async()=>{try{var raw=localStorage.getItem('userToken');var tok=raw?((JSON.parse(raw)||{}).value||raw):'';if(!tok){alert('DeepEther Proxy：没有在本地存储里找到 userToken，请先确认已登录 chat.deepseek.com');return}var resp=await fetch('http://127.0.0.1:18765/credential/claim',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({nonce:\"<nonce>\",token:tok})});if(!resp.ok){throw new Error(await resp.text())}alert('DeepEther Proxy：凭证已送达，可以关闭本页')}catch(err){var raw2=localStorage.getItem('userToken');var tok2=raw2?((JSON.parse(raw2)||{}).value||raw2):'';prompt('DeepEther Proxy：自动送达失败（'+err+'）。请复制下面的 token，粘贴到插件配置 credential.web_token：',tok2)}})()\n\n【统计】\n网页版成功：0 次｜失败：0 次｜降级：0 次\n平均耗时：暂无数据\n熔断器：closed｜进行中：0/?\n最近探活：尚未执行\n- 本地操作员: 你好呀麦麦，今天过得怎么样？\n- 麦麦: 还行吧，刚上线\n- 麦麦: 今天课有点多\n- 麦麦: 累\n- 本地操作员: 麦麦，给我讲讲你今天的心情吧 [目标用户发言]\n\n机器人回复：\n心情一般\n\n请只提取满足以下条件的事实：\n1. 事实值必须能被“目标用户原始发言”直接支持，不能只来自机器人回复或邻近上下文。\n2. 明确是关于目标人物本人的信息。\n3. 具有相对稳定性，可以作为长期记忆保存。\n4. 用简洁中文陈述句表达。\n5. 如果用户原始发言中出现“我/我的/自己”，默认指目标人物，请先改写成关于目标人物的第三人称事实再输出。\n6. 邻近上下文只能用于补全目标用户短答、省略、被追问的问题或代词指向。例如上下文问“你对什么过敏？”，目标用户答“青霉素”，可以提取“目标人物对青霉素过敏”。\n7. 如果完整事实只能靠机器人回复或邻近上下文中的新增事实值成立，而目标用户原始发言没有确认或给出该事实值，不要提取。\n\n不要提取：\n- 机器人的情绪、计划、临时动作、客套话\n- 仅由机器人提出的建议、猜测、玩笑、回忆或承诺\n- 只适用于当前时刻的短期安排\n- 不确定、猜测、反问\n- 与目标人物无关的信息\n\n严格输出 JSON 数组，每项包含 fact、evidence_message_id、evidence_quote。证据片段必须逐字摘自目标用户原始发言。请勿编造消息 ID。例：\n[{\"fact\":\"他喜欢打游戏\",\"evidence_message_id\":\"消息ID\",\"evidence_quote\":\"我喜欢打游戏\"}]\n如果没有可写入的事实，输出 []"
+        }
+      ]
+    }
+  ],
+  "logical_turn_id": "018c727533454c67a83cef6d4875b1a0",
+  "model_info": {
+    "api_provider": "deepether",
+    "extra_params": {
+      "deepether_style": "plain",
+      "deepether_thinking": false
+    },
+    "force_stream_mode": false,
+    "max_tokens": null,
+    "model_identifier": "deepseek-web",
+    "model_type": "llm",
+    "name": "deepether-utils",
+    "send_temperature": false,
+    "temperature": null,
+    "visual": false
+  },
+  "request_kind": "response",
+  "response_format": null,
+  "temperature": null,
+  "tool_options": [],
+  "api_provider": {
+    "field_docs": {
+      "name": "API服务商名称 (可随意命名, 在models的api-provider中需使用这个命名)",
+      "base_url": "API服务商的BaseURL",
+      "api_key": "",
+      "client_type": "客户端类型。内置支持 openai、openai_responses 和 gemini，也可由插件扩展。",
+      "auth_type": "OpenAI 兼容接口的鉴权方式。可选值：`bearer`、`header`、`query`、`none`。",
+      "auth_header_name": "当 `auth_type` 为 `header` 时使用的请求头名称。",
+      "auth_header_prefix": "当 `auth_type` 为 `header` 时使用的请求头前缀。留空表示直接发送原始密钥。",
+      "auth_query_name": "当 `auth_type` 为 `query` 时使用的查询参数名称。",
+      "default_headers": "所有请求默认附带的 HTTP Header。",
+      "default_query": "所有请求默认附带的查询参数。",
+      "organization": "OpenAI 官方接口可选的 `organization`。",
+      "project": "OpenAI 官方接口可选的 `project`。",
+      "model_list_endpoint": "模型列表端点路径。适用于 OpenAI 兼容接口的探测与管理。",
+      "reasoning_parse_mode": "推理内容解析模式。可选值：`auto`、`native`、`think_tag`、`none`。",
+      "tool_argument_parse_mode": "工具参数解析模式。可选值：`auto`、`strict`、`repair`、`double_decode`。",
+      "max_retry": "最大尝试次数 (单个模型API调用失败时, 含首次请求在内最多发送的请求总数, 设为 0 或 1 表示不重试)",
+      "timeout": "API调用的超时时长 (超过这个时长, 本次请求将被视为\"请求超时\", 单位: 秒)",
+      "retry_interval": "重试间隔 (如果API调用失败, 重试的间隔时间, 单位: 秒)"
+    },
+    "suppress_any_warning": false,
+    "name": "deepether",
+    "base_url": "plugin://com.ether.deepether",
+    "api_key": "",
+    "client_type": "com.ether.deepether",
+    "auth_type": "none",
+    "auth_header_name": "Authorization",
+    "auth_header_prefix": "Bearer",
+    "auth_query_name": "api_key",
+    "default_headers": {},
+    "default_query": {},
+    "organization": null,
+    "project": null,
+    "model_list_endpoint": "/models",
+    "reasoning_parse_mode": "auto",
+    "tool_argument_parse_mode": "auto",
+    "max_retry": 1,
+    "timeout": 300,
+    "retry_interval": 4
+  }
+}

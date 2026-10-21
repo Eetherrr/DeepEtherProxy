@@ -1,0 +1,30 @@
+# 本地测试实例（MaiBot 副本，含配置/日志/数据库，体积很大）
+.testenv/
+
+# 第三方文档快照（MaiBot 官方文档的本地缓存，版权归上游，不入公开仓库）
+docs/_ref/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 构建产物（zip 作为 GitHub Release 附件发布，不入库）
+dist/
+*.zip
+
+# 临时文件
+.tmp*
+*.tmp
+
+# 运行期日志与数据
+logs/
+plugins/*/data/
+plugins/*/temp/
+
+# 凭证（绝不入库）
+credential.json
+*.token

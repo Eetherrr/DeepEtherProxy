@@ -1,0 +1,692 @@
+"""LLM Provider 实现：把 Host 请求翻译成网页版调用。
+
+本类不直接依赖 MaiBot 主程序，只依赖 `maibot_sdk` 的 `LLMProviderBase`，
+其余协作对象（配置、日志、凭证、状态、ctx.llm）通过插件实例按鸭子类型获取，便于单测替换。
+
+请求链路：
+```
+context_items → adapter_in → 并发闸门 → 熔断检查 → 建会话 → PoW → completion(SSE)
+                            ↘ 任一环节失败/超预算 → fallback（Host 已配置的官方模型）
+```
+"""
+
+from pathlib import Path
+from typing import Any
+
+import json
+import time
+
+from maibot_sdk import LLMProviderBase
+
+from .adapter_in import RenderedContext, build_messages, style_suffix
+from .antiban import PacingConfig, PacingController, classify_failure
+from .adapter_out import ResponseProtocol, build_response
+from .config import DeepEtherProxyConfig
+from .errors import DeepEtherError, ErrorCode
+from .fallback import FallbackRunner, model_allowed, resolve_model_name
+from .gate import CircuitBreaker, ConcurrencyGate
+from .upstream.web_client import WebUpstreamClient
+
+_DUMP_REQUEST_FILE_TEMPLATE: str = "last_request_{model}.json"
+_DEFAULT_OUTER_TIMEOUT_SEC: float = 120.0
+_DEFAULT_SESSION_REUSE_CALLS: int = 8
+_PACING_STATE_FILE: str = "antiban_state.json"
+
+
+def _antiban_section(config: Any) -> Any:
+    """取 [antiban] 配置节。
+
+    旧配置文件里可能还没有这一节（升级前生成的 config.toml），此时返回 None，
+    调用方用 getattr(..., 默认值) 兜住，保证老配置不会因为缺节而炸掉。
+
+    Args:
+        config: 当前强类型配置。
+
+    Returns:
+        Any: [antiban] 配置节，或 None。
+    """
+
+    return getattr(config, "antiban", None)
+
+
+class DeepEtherProvider(LLMProviderBase):
+    """DeepEther Proxy 的 Provider 编排层。
+
+    Attributes:
+        _plugin: 宿主插件实例；需要提供 `config` 属性、`get_logger()`、
+            `credential_store`、`runtime_state` 与 `ctx.paths` / `ctx.llm`。
+    """
+
+    def __init__(self, plugin: Any) -> None:
+        """初始化 Provider。
+
+        Args:
+            plugin: 插件实例（由 plugin.py 传入，按鸭子类型使用）。
+        """
+
+        self._plugin = plugin
+        self._client: WebUpstreamClient | None = None
+        self._gate: ConcurrencyGate | None = None
+        self._gate_signature: tuple[int, float] | None = None
+        self._circuit: CircuitBreaker | None = None
+        self._circuit_signature: tuple[int, float] | None = None
+        self._fallback: FallbackRunner | None = None
+        self._pacing: PacingController | None = None
+        self._pacing_config: PacingConfig | None = None
+
+    # ─── 基础设施 ───────────────────────────────────────────────────────
+
+    @property
+    def _config(self) -> DeepEtherProxyConfig:
+        """返回当前强类型配置。"""
+
+        return self._plugin.config  # type: ignore[no-any-return]
+
+    @property
+    def _logger(self) -> Any:
+        """返回插件日志器。"""
+
+        return self._plugin.get_logger()
+
+    def _state(self) -> Any:
+        """返回运行时统计对象。"""
+
+        return self._plugin.runtime_state
+
+    def _llm_capability(self) -> Any:
+        """返回 `ctx.llm`；不可用时返回 `None`。"""
+
+        try:
+            return self._plugin.ctx.llm
+        except Exception:  # noqa: BLE001 - 能力不可用不应影响主流程
+            return None
+
+    def _runtime_dir(self) -> Path | None:
+        """返回插件运行期可写目录（不可用时返回 None）。"""
+
+        try:
+            return Path(self._plugin.ctx.paths.runtime_dir)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _effective_token(self) -> str:
+        """返回生效的网页版 token：配置里的优先，其次是书签落盘的。"""
+
+        configured = (self._config.credential.web_token or "").strip()
+        if configured:
+            return configured
+        store = getattr(self._plugin, "credential_store", None)
+        record = getattr(store, "record", None) if store is not None else None
+        return str(getattr(record, "token", "") or "")
+
+    def _mark_credential_invalid(self, reason: str) -> None:
+        """把凭证标记为失效。"""
+
+        store = getattr(self._plugin, "credential_store", None)
+        if store is not None:
+            store.mark_invalid(reason)
+
+    def _ensure_client(self) -> WebUpstreamClient:
+        """按当前配置构造/复用上游客户端。"""
+
+        config = self._config
+        dump_dir = self._runtime_dir() if config.debug.dump_response else None
+        antiban = _antiban_section(config)
+        reuse_calls = int(getattr(antiban, "session_reuse_calls", _DEFAULT_SESSION_REUSE_CALLS))
+        if self._client is None:
+            self._client = WebUpstreamClient(
+                token_provider=self._effective_token,
+                on_credential_invalid=self._mark_credential_invalid,
+                logger=self._logger,
+                dump_dir=dump_dir,
+                verbose=config.debug.verbose_log,
+            )
+        self._client.update_runtime_options(
+            dump_dir=dump_dir,
+            verbose=config.debug.verbose_log,
+            session_reuse_calls=reuse_calls,
+        )
+        return self._client
+
+    def _ensure_resilience(self) -> None:
+        """按当前配置构造/更新并发闸门、熔断器与降级执行器。"""
+
+        config = self._config
+        gate_signature = (config.concurrency.max_concurrency, float(config.concurrency.queue_wait_sec))
+        if self._gate is None:
+            self._gate = ConcurrencyGate(*gate_signature)
+            self._gate_signature = gate_signature
+        elif self._gate_signature != gate_signature:
+            self._gate.reconfigure(*gate_signature)
+            self._gate_signature = gate_signature
+
+        circuit_signature = (
+            config.concurrency.circuit_fail_threshold,
+            float(config.concurrency.circuit_cooldown_sec),
+        )
+        if self._circuit is None:
+            self._circuit = CircuitBreaker(
+                fail_threshold=config.concurrency.circuit_fail_threshold,
+                cooldown_sec=float(config.concurrency.circuit_cooldown_sec),
+            )
+            self._circuit_signature = circuit_signature
+        elif self._circuit_signature != circuit_signature:
+            self._circuit.reconfigure(*circuit_signature)
+            self._circuit_signature = circuit_signature
+
+        if self._fallback is None:
+            self._fallback = FallbackRunner(llm=self._llm_capability(), logger=self._logger)
+
+    def _pacing_state_path(self) -> Path | None:
+        """返回节奏状态的落盘路径（未开启持久化或拿不到运行目录时返回 None）。"""
+
+        if not bool(getattr(self._config.antiban, "persist_state", True)):
+            return None
+        runtime_dir = self._runtime_dir()
+        if runtime_dir is None:
+            return None
+        return runtime_dir / _PACING_STATE_FILE
+
+    def _load_pacing_state(self, pacing: PacingController) -> None:
+        """从磁盘恢复配额与冷却状态，避免"重启即刷新额度"。"""
+
+        path = self._pacing_state_path()
+        if path is None or not path.is_file():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            self._logger.warning("读取节奏状态失败（按空状态继续）：%s", exc)
+            return
+        pacing.load_state(data)
+        self._logger.info("已恢复上游节奏状态：%s", path)
+
+    def _persist_pacing(self, pacing: PacingController) -> None:
+        """把节奏状态落盘（失败只告警，不影响本次请求）。"""
+
+        path = self._pacing_state_path()
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(json.dumps(pacing.dump_state(), ensure_ascii=False), encoding="utf-8")
+            tmp.replace(path)
+        except OSError as exc:
+            self._logger.warning("写入节奏状态失败：%s", exc)
+
+    def _ensure_pacing(self) -> PacingController:
+        """按当前配置构造/更新节奏控制器（一个插件实例一个）。"""
+
+        section = self._config.antiban
+        wanted = PacingConfig(
+            enabled=bool(section.enabled),
+            min_interval_sec=float(section.min_interval_sec),
+            max_interval_sec=float(section.max_interval_sec),
+            jitter_ratio=float(section.jitter_ratio),
+            max_per_minute=int(section.max_per_minute),
+            max_per_hour=int(section.max_per_hour),
+            max_per_day=int(section.max_per_day),
+            cooldown_on_rate_limit_sec=float(section.cooldown_on_rate_limit_sec),
+            cooldown_on_ban_sec=float(section.cooldown_on_ban_sec),
+            adaptive_backoff=bool(section.adaptive_backoff),
+        )
+        if self._pacing is None or self._pacing_config != wanted:
+            was_running = self._pacing is not None
+            self._pacing = PacingController(wanted)
+            self._pacing_config = wanted
+            self._load_pacing_state(self._pacing)
+            if was_running:
+                self._logger.info("反封禁配置变化，节奏控制器已重建")
+        return self._pacing
+
+    @property
+    def pacing_snapshot(self) -> dict[str, Any]:
+        """返回节奏控制状态（供 /deepether-status 展示）。"""
+
+        if self._pacing is None:
+            return {}
+        return self._pacing.snapshot()
+
+    def ensure_client(self) -> WebUpstreamClient:
+        """返回（必要时创建）上游客户端，供自检与定时探活使用。"""
+
+        return self._ensure_client()
+
+    async def aclose(self) -> None:
+        """关闭上游连接池。"""
+
+        client = self._client
+        self._client = None
+        if client is not None:
+            await client.close()
+
+    @property
+    def circuit_state(self) -> str:
+        """返回熔断器状态（供状态命令展示）。"""
+
+        return self._circuit.state if self._circuit is not None else "closed"
+
+    @property
+    def gate_rejected(self) -> int:
+        """返回因排队超预算被闸门拒绝的请求数（供状态命令展示）。"""
+
+        return self._gate.rejected if self._gate is not None else 0
+
+    @property
+    def gate_status(self) -> tuple[int, int]:
+        """返回 `(进行中, 并发上限)`，供状态命令展示。"""
+
+        if self._gate is None:
+            # 还没有请求时闸门尚未按配置创建，直接回落到配置值，避免状态里显示 "0/?"。
+            return (0, self._config.concurrency.max_concurrency)
+        return (self._gate.in_flight, self._gate.limit)
+
+    # ─── 对外入口 ───────────────────────────────────────────────────────
+
+    async def get_response(self, request: dict[str, Any]) -> dict[str, Any]:
+        """处理 `operation="response"` 的文本生成请求。
+
+        Args:
+            request: Host 序列化后的响应请求，字段见报告 §2.3。
+
+        Returns:
+            dict[str, Any]: 一期为旧标量协议响应，二期可切 output_items。
+
+        Raises:
+            DeepEtherError: 上游不可用且无法降级时抛出，由插件层转成中文错误。
+        """
+
+        try:
+            return await self._get_response_impl(request)
+        except DeepEtherError as exc:
+            self._state().record_failure(exc.code, exc.message)
+            raise
+        except Exception as exc:  # noqa: BLE001 - 兜住一切异常，避免 Host 只看到"没回话"
+            error = DeepEtherError(
+                ErrorCode.INTERNAL,
+                "插件内部异常，请把日志里的这一条发给开发者",
+                detail=f"{type(exc).__name__}: {exc}",
+            )
+            self._state().record_failure(error.code, error.message)
+            raise error from exc
+        finally:
+            self._release_dangling_probe()
+
+    def _release_dangling_probe(self) -> None:
+        """请求没有正常结束（例如被 Host 取消）时归还 half_open 探针名额。"""
+
+        circuit = self._circuit
+        if circuit is not None and circuit.probe_in_flight:
+            circuit.abort_probe()
+
+    async def get_embedding(self, request: dict[str, Any]) -> dict[str, Any]:
+        """网页版没有 embedding 接口。
+
+        Raises:
+            DeepEtherError: 总是抛出，提示改用官方模型。
+        """
+
+        raise DeepEtherError(
+            ErrorCode.NOT_SUPPORTED,
+            "DeepSeek 网页版没有 embedding 能力，请把 embedding 任务指向官方模型",
+        )
+
+    async def get_audio_transcriptions(self, request: dict[str, Any]) -> dict[str, Any]:
+        """网页版没有语音转写接口。
+
+        Raises:
+            DeepEtherError: 总是抛出，提示改用官方模型。
+        """
+
+        raise DeepEtherError(
+            ErrorCode.NOT_SUPPORTED,
+            "DeepSeek 网页版没有语音转写能力，请把 voice 任务指向官方模型",
+        )
+
+    # ─── 实际实现 ───────────────────────────────────────────────────────
+
+    async def _get_response_impl(self, request: dict[str, Any]) -> dict[str, Any]:
+        """完整链路：投影 → 闸门/熔断 → 上游 → 失败降级。"""
+
+        config = self._config
+        rendered = self._render_context(request)
+        self._maybe_dump_request(request)
+        model_name = resolve_model_name(request)
+        budget_ms = self._outer_budget_ms(request, config)
+        started = time.monotonic()
+
+        if config.behavior.mode == "official_only":
+            return await self._fallback_or_raise(
+                rendered=rendered,
+                request=request,
+                config=config,
+                model_name=model_name,
+                started=started,
+                budget_ms=budget_ms,
+                reason="通道配置为 official_only",
+            )
+
+        if not self._effective_token():
+            return await self._fallback_or_raise(
+                rendered=rendered,
+                request=request,
+                config=config,
+                model_name=model_name,
+                started=started,
+                budget_ms=budget_ms,
+                reason="尚未获取网页版凭证",
+            )
+
+        self._ensure_resilience()
+        assert self._gate is not None and self._circuit is not None
+
+        if not self._circuit.allow():
+            return await self._fallback_or_raise(
+                rendered=rendered,
+                request=request,
+                config=config,
+                model_name=model_name,
+                started=started,
+                budget_ms=budget_ms,
+                reason=f"熔断中（连续失败 {self._circuit.consecutive_failures} 次）",
+            )
+
+        # 反封禁：同一账号串行 + 8~20s 抖动 + 三级配额。等待发生在闸门之外，
+        # 免得排队占住并发名额；预算不够就立刻降级，而不是把 Host 挂到超时。
+        pacing = self._ensure_pacing()
+        try:
+            waited = await pacing.acquire(budget_ms=budget_ms)
+        except DeepEtherError as exc:
+            self._logger.info("节奏控制拒绝本次网页版调用：%s", exc.message)
+            return await self._fallback_or_raise(
+                rendered=rendered,
+                request=request,
+                config=config,
+                model_name=model_name,
+                started=started,
+                budget_ms=budget_ms,
+                reason=f"{exc.code}: {exc.message}",
+                original=exc,
+            )
+        if waited > 0:
+            self._logger.info("节奏控制：等待 %.1f 秒后调用上游", waited)
+
+        try:
+            async with self._gate:
+                snapshot = await self._call_web(config, rendered, request, budget_ms)
+        except DeepEtherError as exc:
+            # 排队超预算 = 本地容量不足，请求根本没有到上游，不能算作熔断器的
+            # "上游连续失败"（§6.6.1）。否则一次群聊突发就能把熔断打开，
+            # 让接下来 cooldown 内的所有请求绕过网页版——容量抖动被放大成故障。
+            if exc.code != ErrorCode.CONCURRENCY_REJECTED:
+                self._circuit.record_failure()
+            # 只有"上游在风控我们"才退避：PoW 过期、凭证失效、5xx 都算技术性失败。
+            try:
+                kind = classify_failure(code=exc.code, message=exc.message, body=exc.detail)
+            except Exception:  # noqa: BLE001 - 分类失败不应放大成请求失败
+                kind = None
+            if kind is not None:
+                pacing.note_failure(kind)
+                self._persist_pacing(pacing)
+                self._logger.warning("记录风控信号 %s（后续退避已生效）", kind)
+            if config.behavior.mode == "web_only":
+                raise
+            return await self._fallback_or_raise(
+                rendered=rendered,
+                request=request,
+                config=config,
+                model_name=model_name,
+                started=started,
+                budget_ms=budget_ms,
+                reason=f"{exc.code}: {exc.message}",
+                original=exc,
+            )
+
+        self._circuit.record_success()
+        pacing.note_success()
+        self._persist_pacing(pacing)
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        self._state().record_success(elapsed_ms)
+        self._state().record_probe(True, "最近一次调用成功")
+        self._logger.info(
+            "网页版调用成功：耗时 %d ms，正文 %d 字 / 思考 %d 字，上下文 %d 条（丢弃 %d 条）",
+            elapsed_ms,
+            len(snapshot.content),
+            len(snapshot.thinking),
+            len(rendered.messages),
+            rendered.dropped_items,
+        )
+        return self._build_web_response(config, snapshot, rendered, elapsed_ms)
+
+    async def _call_web(
+        self,
+        config: DeepEtherProxyConfig,
+        rendered: RenderedContext,
+        request: dict[str, Any],
+        budget_ms: int,
+    ) -> Any:
+        """建会话 + 求解 PoW + 读完 SSE。"""
+
+        timeout_sec = float(config.behavior.request_timeout_sec)
+        if budget_ms > 0:
+            timeout_sec = max(5.0, min(timeout_sec, budget_ms / 1000.0))
+        client = self._ensure_client()
+        antiban = _antiban_section(config)
+        reuse_calls = int(getattr(antiban, "session_reuse_calls", _DEFAULT_SESSION_REUSE_CALLS))
+        # 复用同一个会话（而不是每轮新建）：既是降低封禁风险的措施（docs/ANTIBAN.md 措施 4），
+        # 也省掉每轮一次 chat_session/create 往返。
+        session_id = await client.acquire_session(reuse_limit=reuse_calls)
+        try:
+            snapshot = await client.complete(
+                prompt=rendered.text,
+                session_id=session_id,
+                thinking_enabled=self._thinking_enabled(config, request),
+                search_enabled=config.behavior.search_enabled,
+                model_type=config.behavior.model_type,
+                timeout_sec=timeout_sec,
+            )
+        except DeepEtherError:
+            # 失败的会话可能已经"半截"（上游有记录但没给完内容），直接换新会更像正常用户。
+            client.invalidate_session()
+            raise
+        # 报告 §4.5.3 细节 1/2：replyer 侧的空响应不会自动切换模型，
+        # 只有让本 Provider 返回 success=false（这里抛异常）才会触发 Host 的 model_list 主备切换。
+        # 因此"只有思考、没有正文"也必须算失败，不能把空正文交回 Host。
+        if not snapshot.content.strip():
+            raise DeepEtherError(
+                ErrorCode.UPSTREAM_EMPTY,
+                (
+                    "网页版只返回了思考内容、没有正文" if snapshot.thinking.strip()
+                    else "网页版没有返回任何正文，可能是上游协议变更或触发风控"
+                ),
+                detail=(
+                    f"events={snapshot.events} content_fragments={snapshot.content_fragments} "
+                    f"thinking_fragments={snapshot.thinking_fragments} "
+                    f"ignored={snapshot.ignored_values} parse_errors={snapshot.parse_errors} "
+                    f"thinking_len={len(snapshot.thinking)}"
+                ),
+                retryable=True,
+            )
+        return snapshot
+
+    def _build_web_response(
+        self,
+        config: DeepEtherProxyConfig,
+        snapshot: Any,
+        rendered: RenderedContext,
+        elapsed_ms: int,
+    ) -> dict[str, Any]:
+        """把上游快照转成 Host 响应。"""
+
+        return build_response(
+            config.behavior.response_protocol,
+            content=snapshot.content,
+            reasoning=snapshot.thinking,
+            total_tokens=snapshot.total_tokens,
+            raw_data={
+                "stage": "web",
+                "elapsed_ms": elapsed_ms,
+                "content_fragments": snapshot.content_fragments,
+                "thinking_fragments": snapshot.thinking_fragments,
+                "events": snapshot.events,
+                "ignored_values": snapshot.ignored_values,
+                "parse_errors": snapshot.parse_errors,
+                "dropped_items": rendered.dropped_items,
+                "unknown_item_types": rendered.unknown_types,
+            },
+        )
+
+    async def _fallback_or_raise(
+        self,
+        *,
+        rendered: RenderedContext,
+        request: dict[str, Any],
+        config: DeepEtherProxyConfig,
+        model_name: str,
+        started: float,
+        budget_ms: int,
+        reason: str,
+        original: DeepEtherError | None = None,
+    ) -> dict[str, Any]:
+        """走降级通道；不允许降级时抛出原始错误。"""
+
+        if config.behavior.mode == "web_only":
+            if original is not None:
+                raise original
+            raise DeepEtherError(
+                ErrorCode.FALLBACK_UNAVAILABLE,
+                f"通道配置为 web_only，不会降级：{reason}",
+            )
+
+        self._ensure_resilience()
+        assert self._fallback is not None
+
+        if not model_allowed(model_name, config.fallback.fallback_for_models):
+            self._logger.warning("模型 %s 不在降级白名单内，直接失败：%s", model_name, reason)
+            if original is not None:
+                raise original
+            raise DeepEtherError(
+                ErrorCode.FALLBACK_UNAVAILABLE,
+                f"模型 {model_name} 不允许降级：{reason}",
+            )
+
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        remaining_ms = max(0, budget_ms - elapsed_ms)
+        self._state().record_fallback(reason)
+        self._logger.warning("触发降级（模型=%s）：%s", model_name, reason)
+        return await self._fallback.run(
+            messages=rendered.messages,
+            request=request,
+            config=config.fallback,
+            protocol=config.behavior.response_protocol,
+            remaining_ms=remaining_ms,
+            reason=reason,
+        )
+
+    def _outer_budget_ms(self, request: dict[str, Any], config: DeepEtherProxyConfig) -> int:
+        """估算外层（Host）给本次调用留下的时间预算。"""
+
+        api_provider = request.get("api_provider")
+        timeout_sec: float = _DEFAULT_OUTER_TIMEOUT_SEC
+        if isinstance(api_provider, dict):
+            try:
+                timeout_sec = float(api_provider.get("timeout") or _DEFAULT_OUTER_TIMEOUT_SEC)
+            except (TypeError, ValueError):
+                timeout_sec = _DEFAULT_OUTER_TIMEOUT_SEC
+        if timeout_sec <= 0:
+            timeout_sec = float(config.behavior.request_timeout_sec)
+        # 留 1.5s 余量给回程序列化与 Host 侧处理。
+        return max(0, int(timeout_sec * 1000) - 1500)
+
+    def _model_extra_params(self, request: dict[str, Any]) -> dict[str, Any]:
+        """返回本次请求对应模型在 `model_config.toml` 里配置的 `extra_params`。
+
+        Args:
+            request: Host 请求字典。
+
+        Returns:
+            dict[str, Any]: 模型级额外参数（缺失时为空字典）。
+        """
+
+        extra = request.get("extra_params")
+        if isinstance(extra, dict):
+            return extra
+        model_info = request.get("model_info")
+        if isinstance(model_info, dict):
+            nested = model_info.get("extra_params")
+            if isinstance(nested, dict):
+                return nested
+        return {}
+
+    def _prompt_style(self, request: dict[str, Any]) -> str:
+        """决定本次请求的提示词风格：模型 extra_params 覆盖优先，其次全局配置。
+
+        Args:
+            request: Host 请求字典。
+
+        Returns:
+            str: `plain` / `replyer` / `raw`。
+        """
+
+        style = self._model_extra_params(request).get("deepether_style")
+        if isinstance(style, str) and style in ("plain", "replyer", "raw"):
+            return style
+        return self._config.behavior.prompt_style
+
+    def _thinking_enabled(self, config: DeepEtherProxyConfig, request: dict[str, Any]) -> bool:
+        """决定本次请求是否开启深度思考（模型级 `deepether_thinking` 可覆盖）。
+
+        Args:
+            config: 当前配置。
+            request: Host 请求字典。
+
+        Returns:
+            bool: 是否开启思考模式。
+        """
+
+        override = self._model_extra_params(request).get("deepether_thinking")
+        if isinstance(override, bool):
+            return override
+        return config.behavior.thinking_enabled
+
+    def _render_context(self, request: dict[str, Any]) -> RenderedContext:
+        """把请求里的 `context_items` 投影成 prompt。"""
+
+        style = self._prompt_style(request)
+        rendered = build_messages(
+            request.get("context_items"),
+            max_history_chars=self._config.behavior.max_history_chars,
+            prompt_suffix=style_suffix(style),
+        )
+        if not rendered.messages:
+            raise DeepEtherError(
+                ErrorCode.PROTOCOL_ERROR,
+                "Host 请求里没有可用的上下文内容，无法生成 prompt",
+                detail=f"context_items 数量={len(request.get('context_items') or [])}",
+            )
+        if rendered.unknown_types:
+            self._logger.warning(
+                "上下文里出现未知的 item_type（可能是宿主新增类型）：%s",
+                ", ".join(rendered.unknown_types),
+            )
+        return rendered
+
+    def _maybe_dump_request(self, request: dict[str, Any]) -> None:
+        """按配置把原始请求落盘，便于固化契约测试样本。"""
+
+        if not self._config.debug.dump_request:
+            return
+        runtime_dir = self._runtime_dir()
+        if runtime_dir is None:
+            return
+        model_info = request.get("model_info")
+        raw_model = str((model_info or {}).get("name") or "unknown") if isinstance(model_info, dict) else "unknown"
+        safe_model = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in raw_model) or "unknown"
+        try:
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+            path = runtime_dir / _DUMP_REQUEST_FILE_TEMPLATE.format(model=safe_model)
+            path.write_text(json.dumps(request, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._logger.info("已把 Host 原始请求写入 %s", path)
+        except (OSError, TypeError, ValueError) as exc:
+            self._logger.warning("写入 Host 请求快照失败：%s", exc)
