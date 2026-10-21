@@ -1271,7 +1271,7 @@ New-Item -ItemType Junction -Path "E:\Dev\NapCat\NapCatData\apps\maibot\73fc1ca9
 
 ## 11. 参考来源
 
-**MaiBot 官方文档**（已缓存到 `docs/_ref/maibot/`）
+**MaiBot 官方文档**（正文引用里的 `docs/_ref/maibot/...` 是作者本地的文档缓存，**不随仓库发布**；对应官方链接见下）
 - 插件开发指南：https://docs.mai-mai.org/plugin/
 - LLMProvider 组件：https://docs.mai-mai.org/plugin/llmprovider
 - Manifest：https://docs.mai-mai.org/plugin/manifest

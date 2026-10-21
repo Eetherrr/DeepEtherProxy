@@ -6,6 +6,11 @@ import importlib.util
 import json
 import sys
 
+import pytest
+
+# 这两个用例依赖 MaiBot 宿主/SDK：只装了插件仓库、没装宿主时自动跳过，而不是报错。
+pytest.importorskip("maibot_sdk")
+
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -28,7 +33,9 @@ def _load_plugin_module():
 def test_manifest_is_strict_valid():
     """manifest 必须能通过宿主自带的严格校验器。"""
 
-    from src.plugin_runtime.runner.manifest_validator import ManifestValidator
+    ManifestValidator = pytest.importorskip(
+        "src.plugin_runtime.runner.manifest_validator"
+    ).ManifestValidator
 
     raw = json.loads((PLUGIN_ROOT / "_manifest.json").read_text(encoding="utf-8"))
     validator = ManifestValidator()
