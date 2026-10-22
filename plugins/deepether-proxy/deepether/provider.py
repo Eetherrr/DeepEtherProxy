@@ -1,13 +1,16 @@
 """LLM Provider 实现：把 Host 请求翻译成网页版调用。
 
 本类不直接依赖 MaiBot 主程序，只依赖 `maibot_sdk` 的 `LLMProviderBase`，
-其余协作对象（配置、日志、凭证、状态、ctx.llm）通过插件实例按鸭子类型获取，便于单测替换。
+其余协作对象（配置、日志、凭证、状态）通过插件实例按鸭子类型获取，便于单测替换。
 
 请求链路：
 ```
 context_items → adapter_in → 并发闸门 → 熔断检查 → 建会话 → PoW → completion(SSE)
-                            ↘ 任一环节失败/超预算 → fallback（Host 已配置的官方模型）
+                            ↘ 任一环节失败/超预算 → 抛错，由 Host 按任务 model_list 切换下一个模型
 ```
+
+插件只回答"网页版这条通道能不能给出有效正文"：给不出就抛错。它就是一个普通
+LLM Provider——失败与其它模型失败没有区别，由 MaiBot 的模型调度按任务配置处理。
 """
 
 from pathlib import Path
@@ -20,10 +23,9 @@ from maibot_sdk import LLMProviderBase
 
 from .adapter_in import RenderedContext, build_messages, style_suffix
 from .antiban import PacingConfig, PacingController, classify_failure
-from .adapter_out import ResponseProtocol, build_response
+from .adapter_out import build_response
 from .config import DeepEtherProxyConfig
 from .errors import DeepEtherError, ErrorCode
-from .fallback import FallbackRunner, model_allowed, resolve_model_name
 from .gate import CircuitBreaker, ConcurrencyGate
 from .upstream.web_client import WebUpstreamClient
 
@@ -54,7 +56,7 @@ class DeepEtherProvider(LLMProviderBase):
 
     Attributes:
         _plugin: 宿主插件实例；需要提供 `config` 属性、`get_logger()`、
-            `credential_store`、`runtime_state` 与 `ctx.paths` / `ctx.llm`。
+            `credential_store`、`runtime_state` 与 `ctx.paths`。
     """
 
     def __init__(self, plugin: Any) -> None:
@@ -70,7 +72,6 @@ class DeepEtherProvider(LLMProviderBase):
         self._gate_signature: tuple[int, float] | None = None
         self._circuit: CircuitBreaker | None = None
         self._circuit_signature: tuple[int, float] | None = None
-        self._fallback: FallbackRunner | None = None
         self._pacing: PacingController | None = None
         self._pacing_config: PacingConfig | None = None
 
@@ -92,14 +93,6 @@ class DeepEtherProvider(LLMProviderBase):
         """返回运行时统计对象。"""
 
         return self._plugin.runtime_state
-
-    def _llm_capability(self) -> Any:
-        """返回 `ctx.llm`；不可用时返回 `None`。"""
-
-        try:
-            return self._plugin.ctx.llm
-        except Exception:  # noqa: BLE001 - 能力不可用不应影响主流程
-            return None
 
     def _runtime_dir(self) -> Path | None:
         """返回插件运行期可写目录（不可用时返回 None）。"""
@@ -149,7 +142,7 @@ class DeepEtherProvider(LLMProviderBase):
         return self._client
 
     def _ensure_resilience(self) -> None:
-        """按当前配置构造/更新并发闸门、熔断器与降级执行器。"""
+        """按当前配置构造/更新并发闸门与熔断器。"""
 
         config = self._config
         gate_signature = (config.concurrency.max_concurrency, float(config.concurrency.queue_wait_sec))
@@ -173,9 +166,6 @@ class DeepEtherProvider(LLMProviderBase):
         elif self._circuit_signature != circuit_signature:
             self._circuit.reconfigure(*circuit_signature)
             self._circuit_signature = circuit_signature
-
-        if self._fallback is None:
-            self._fallback = FallbackRunner(llm=self._llm_capability(), logger=self._logger)
 
     def _pacing_state_path(self) -> Path | None:
         """返回节奏状态的落盘路径（未开启持久化或拿不到运行目录时返回 None）。"""
@@ -294,13 +284,16 @@ class DeepEtherProvider(LLMProviderBase):
             dict[str, Any]: 一期为旧标量协议响应，二期可切 output_items。
 
         Raises:
-            DeepEtherError: 上游不可用且无法降级时抛出，由插件层转成中文错误。
+            DeepEtherError: 网页版不可用时抛出带中文说明的错误（与其它模型失败一样，
+                由 MaiBot 的模型调度处理）。
         """
 
         try:
-            return await self._get_response_impl(request)
+            return await self._request_web(request)
         except DeepEtherError as exc:
             self._state().record_failure(exc.code, exc.message)
+            # 只记录"这条通道这次失败"这一事实；后续调度由 MaiBot 负责。
+            self._logger.warning("网页版调用失败（原因：%s: %s）", exc.code, exc.message)
             raise
         except Exception as exc:  # noqa: BLE001 - 兜住一切异常，避免 Host 只看到"没回话"
             error = DeepEtherError(
@@ -309,6 +302,7 @@ class DeepEtherProvider(LLMProviderBase):
                 detail=f"{type(exc).__name__}: {exc}",
             )
             self._state().record_failure(error.code, error.message)
+            self._logger.warning("网页版通道内部异常：%s", error.detail)
             raise error from exc
         finally:
             self._release_dangling_probe()
@@ -346,69 +340,43 @@ class DeepEtherProvider(LLMProviderBase):
 
     # ─── 实际实现 ───────────────────────────────────────────────────────
 
-    async def _get_response_impl(self, request: dict[str, Any]) -> dict[str, Any]:
-        """完整链路：投影 → 闸门/熔断 → 上游 → 失败降级。"""
+    async def _request_web(self, request: dict[str, Any]) -> dict[str, Any]:
+        """完整链路：投影 → 闸门/熔断 → 上游；任一步失败都直接抛错。"""
 
         config = self._config
+
+        if config.behavior.mode == "official_only":
+            # 这条通道整体关闭：即使请求仍被送进来（旧配置还留着接线），也直接失败，
+            # 避免继续拿"疑似封号"的账号发请求。放在投影之前，连 prompt 都不渲染。
+            raise DeepEtherError(
+                ErrorCode.CHANNEL_DISABLED,
+                "通道配置为 official_only，本插件不接管网页版调用",
+            )
+
         rendered = self._render_context(request)
         self._maybe_dump_request(request)
-        model_name = resolve_model_name(request)
         budget_ms = self._outer_budget_ms(request, config)
         started = time.monotonic()
 
-        if config.behavior.mode == "official_only":
-            return await self._fallback_or_raise(
-                rendered=rendered,
-                request=request,
-                config=config,
-                model_name=model_name,
-                started=started,
-                budget_ms=budget_ms,
-                reason="通道配置为 official_only",
-            )
-
         if not self._effective_token():
-            return await self._fallback_or_raise(
-                rendered=rendered,
-                request=request,
-                config=config,
-                model_name=model_name,
-                started=started,
-                budget_ms=budget_ms,
-                reason="尚未获取网页版凭证",
+            raise DeepEtherError(
+                ErrorCode.CREDENTIAL_MISSING,
+                "尚未获取网页版凭证，请在插件配置的 credential.web_token 填入网页版 token",
             )
 
         self._ensure_resilience()
         assert self._gate is not None and self._circuit is not None
 
         if not self._circuit.allow():
-            return await self._fallback_or_raise(
-                rendered=rendered,
-                request=request,
-                config=config,
-                model_name=model_name,
-                started=started,
-                budget_ms=budget_ms,
-                reason=f"熔断中（连续失败 {self._circuit.consecutive_failures} 次）",
+            raise DeepEtherError(
+                ErrorCode.CIRCUIT_OPEN,
+                f"网页版连续失败 {self._circuit.consecutive_failures} 次，熔断冷却中",
             )
 
         # 反封禁：同一账号串行 + 8~20s 抖动 + 三级配额。等待发生在闸门之外，
-        # 免得排队占住并发名额；预算不够就立刻降级，而不是把 Host 挂到超时。
+        # 免得排队占住并发名额；预算不够就立刻失败，而不是把请求挂到超时。
         pacing = self._ensure_pacing()
-        try:
-            waited = await pacing.acquire(budget_ms=budget_ms)
-        except DeepEtherError as exc:
-            self._logger.info("节奏控制拒绝本次网页版调用：%s", exc.message)
-            return await self._fallback_or_raise(
-                rendered=rendered,
-                request=request,
-                config=config,
-                model_name=model_name,
-                started=started,
-                budget_ms=budget_ms,
-                reason=f"{exc.code}: {exc.message}",
-                original=exc,
-            )
+        waited = await pacing.acquire(budget_ms=budget_ms)
         if waited > 0:
             self._logger.info("节奏控制：等待 %.1f 秒后调用上游", waited)
 
@@ -430,18 +398,7 @@ class DeepEtherProvider(LLMProviderBase):
                 pacing.note_failure(kind)
                 self._persist_pacing(pacing)
                 self._logger.warning("记录风控信号 %s（后续退避已生效）", kind)
-            if config.behavior.mode == "web_only":
-                raise
-            return await self._fallback_or_raise(
-                rendered=rendered,
-                request=request,
-                config=config,
-                model_name=model_name,
-                started=started,
-                budget_ms=budget_ms,
-                reason=f"{exc.code}: {exc.message}",
-                original=exc,
-            )
+            raise
 
         self._circuit.record_success()
         pacing.note_success()
@@ -490,9 +447,8 @@ class DeepEtherProvider(LLMProviderBase):
             # 失败的会话可能已经"半截"（上游有记录但没给完内容），直接换新会更像正常用户。
             client.invalidate_session()
             raise
-        # 报告 §4.5.3 细节 1/2：replyer 侧的空响应不会自动切换模型，
-        # 只有让本 Provider 返回 success=false（这里抛异常）才会触发 Host 的 model_list 主备切换。
-        # 因此"只有思考、没有正文"也必须算失败，不能把空正文交回 Host。
+        # 报告 §4.5.3 细节 1/2：空响应（含"只有思考、没有正文"）必须判失败，
+        # 不能把空正文当成功返回，否则用户会收到一条空回复。
         if not snapshot.content.strip():
             raise DeepEtherError(
                 ErrorCode.UPSTREAM_EMPTY,
@@ -535,53 +491,6 @@ class DeepEtherProvider(LLMProviderBase):
                 "dropped_items": rendered.dropped_items,
                 "unknown_item_types": rendered.unknown_types,
             },
-        )
-
-    async def _fallback_or_raise(
-        self,
-        *,
-        rendered: RenderedContext,
-        request: dict[str, Any],
-        config: DeepEtherProxyConfig,
-        model_name: str,
-        started: float,
-        budget_ms: int,
-        reason: str,
-        original: DeepEtherError | None = None,
-    ) -> dict[str, Any]:
-        """走降级通道；不允许降级时抛出原始错误。"""
-
-        if config.behavior.mode == "web_only":
-            if original is not None:
-                raise original
-            raise DeepEtherError(
-                ErrorCode.FALLBACK_UNAVAILABLE,
-                f"通道配置为 web_only，不会降级：{reason}",
-            )
-
-        self._ensure_resilience()
-        assert self._fallback is not None
-
-        if not model_allowed(model_name, config.fallback.fallback_for_models):
-            self._logger.warning("模型 %s 不在降级白名单内，直接失败：%s", model_name, reason)
-            if original is not None:
-                raise original
-            raise DeepEtherError(
-                ErrorCode.FALLBACK_UNAVAILABLE,
-                f"模型 {model_name} 不允许降级：{reason}",
-            )
-
-        elapsed_ms = int((time.monotonic() - started) * 1000)
-        remaining_ms = max(0, budget_ms - elapsed_ms)
-        self._state().record_fallback(reason)
-        self._logger.warning("触发降级（模型=%s）：%s", model_name, reason)
-        return await self._fallback.run(
-            messages=rendered.messages,
-            request=request,
-            config=config.fallback,
-            protocol=config.behavior.response_protocol,
-            remaining_ms=remaining_ms,
-            reason=reason,
         )
 
     def _outer_budget_ms(self, request: dict[str, Any], config: DeepEtherProxyConfig) -> int:

@@ -57,7 +57,7 @@ class RenderedContext:
     """一次请求投影后的结果。"""
 
     messages: list[dict[str, str]]
-    """OpenAI 风格的 `[{"role", "content"}]`，供降级通道直接复用。"""
+    """OpenAI 风格的 `[{"role", "content"}]`，供日志/调试查看（网页版只用 `text`）。"""
 
     text: str
     """拍平后的单条 prompt，供网页版使用。"""

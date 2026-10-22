@@ -31,8 +31,8 @@
 | 5 | 浏览器指纹自洽（Accept-Language / sec-ch-ua* / sec-fetch-*） | `constants.BROWSER_XHR_HEADERS` + `web_client._headers` | ✅ |
 | 6 | HTTP/2（装了 `h2` 就自动启用；Chrome 一律 h2，直连 h1.1 是弱指纹） | `web_client._HTTP2_AVAILABLE` | ✅（可选依赖） |
 | 7 | 风控信号 → 长冷却熔断（429 冷却 15min，疑似封号 6h） | antiban + `gate.CircuitBreaker` | ✅ |
-| 8 | 失败快速降级，绝不"重试到死" | provider._get_response_impl → fallback | ✅ |
-| 9 | 降级成本控制：只让 replyer 等指定模型走网页版 | `[fallback] fallback_for_models` | ✅（配置即可） |
+| 8 | 失败时本次调用直接失败（插件不重试、不回调 `ctx.llm`），由 MaiBot 的模型调度处理 | `deepether/provider.py` get_response → 抛 `DeepEtherError` | ✅ |
+| 9 | 模型路由控制：只让 replyer/utils 等指定任务走网页版 | 任务 `model_list` + `selection_strategy = sequential` + `api_providers[].max_retry = 1` | ✅（配置即可） |
 | 10 | 探活降噪（30min → 60min + 抖动） | `credential.health_check_interval_min` | ⬜ 建议 |
 | 11 | 错峰使用（夜间/低峰优先，白天高峰降配额） | antiban 扩展 | ⬜ 二期 |
 | 12 | 多账号 token 池轮换（每 token 独立 pacing） | 二期 | ⬜ 二期 |
@@ -43,7 +43,7 @@
 - 同一个 token **永远只允许一个在途请求**（不是"最多 3 个"）：网页版账号级并发确实能到 3，但"一个人同时发 3 个问题"本身不是正常行为，而排队 20 秒对聊天机器人是可接受的。
 - 两次请求间隔 **8~20s 随机抖动**，不是固定 8s：固定间隔是最容易做周期性检测的特征。抖动比例由 `[antiban] jitter_ratio`（默认 0.25）控制。
 - 三级配额同时生效：分钟级挡突发、小时级挡爬坡、天级挡"挂机一整天的机器人"。
-- 配额耗尽时**不是失败**，而是直接走 Host 官方模型（降级），对话体验不断线——网页版通道是"省钱额度"，不是"可用性依赖"。
+- 配额耗尽时本次调用直接失败，由 MaiBot 的模型调度处理（与其它模型失败一致）——网页版通道是"省钱额度"，不是"可用性依赖"。
 
 ### 措施 3：能区分"我们错了"和"上游在风控"
 
@@ -84,7 +84,7 @@
 | `[pow_failed]` / 40301 | PoW 算法或挑战变了 | 检查 `upstream/pow.py` 与 `deepseek-pow` 版本；**不要**改 antiban |
 | `[upstream_http]` 429 | 节奏太快或当天调用过多 | 什么都不用手动做（已自动 15min 冷却）；若反复出现，把 `max_per_hour` 减半 |
 | 401/403 + `[credential_invalid]` | token 过期 | 重新从浏览器 localStorage 取 `userToken` |
-| 账号被风控封禁（3 天） | 账号级 | 立即把 `behavior.mode` 改成 `official_only`，让机制性问题不变成"反复撞墙"；解封后从 `max_per_day=50` 起爬坡 |
+| 账号被风控封禁（3 天） | 账号级 | 把 `behavior.mode` 改成 `official_only`（自动注册会把 `deepether-*` 从任务 `model_list` 移除），让机制性问题不变成"反复撞墙"；解封后改回 `web_first`，从 `max_per_day=50` 起爬坡 |
 | 正文空、只有 thinking | 软拦截/上游变更 | 看 `/deepether-status` 的 `upstream_empty` 计数；连续出现时降到 1 次/分钟 |
 
 ## 5. 明确**不**采用的"反封"手段
@@ -124,8 +124,10 @@
 | 会话复用 | `plugins/deepether-proxy/deepether/upstream/web_client.py` | `acquire_session(*, reuse_limit)` / `invalidate_session()` |
 | 状态展示 | `plugins/deepether-proxy/deepether/status.py` | `_render_pacing`（`plugin.py` 传 `pacing=self._provider.pacing_snapshot`） |
 
-调用点固定为 `provider._get_response_impl`：**熔断检查之后、并发闸门之前** `await pacing.acquire(budget_ms=budget_ms)`；
-`acquire` 抛 `DeepEtherError(ErrorCode.PACING_COOLDOWN / PACING_QUOTA)` 时整条请求直接走 `_fallback_or_raise`（降级到 Host 模型，不报错给用户）。
+调用点固定在 `provider.get_response` → `_request_web`：**熔断检查之后、并发闸门之前** `await pacing.acquire(budget_ms=budget_ms)`；
+`acquire` 抛 `DeepEtherError(ErrorCode.PACING_COOLDOWN / PACING_QUOTA)` 时本次调用直接失败
+（0.3.0 起插件不内置兜底调用，与其它模型失败一样由 MaiBot 的模型调度处理；
+插件只留下一条中文 warning 与失败计数）。
 
 ### 8.2 配置键（`[antiban]`，WebUI 有独立「反封禁」页签）
 
@@ -176,11 +178,11 @@ persist_state = true
 冷却：无
 ```
 
-冷却中会把"冷却：无"换成 `冷却中：<原因>（约 N 秒后恢复；期间自动走官方模型）`，
+冷却中会把"冷却：无"换成 `冷却中：<原因>（约 N 秒后恢复；期间网页版调用直接失败）`，
 检测到封禁级信号时追加一行提示，连续失败 > 0 时显示次数（到 3 次升级长冷却）。
 
 ### 8.6 回归
 
 - `plugins/deepether-proxy/tests/test_antiban.py`：15 条，假时钟/假 sleeper，不真睡。
-- 全量：`128 passed, 4 skipped`（`.testenv/maibot/.venv/Scripts/python.exe -m pytest -q`）。
+- 全量：`cd plugins/deepether-proxy && ..\..\.testenv\maibot\.venv\Scripts\python.exe -m pytest -q`（当前 151 passed, 4 skipped）。
 

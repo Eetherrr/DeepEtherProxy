@@ -1,6 +1,7 @@
 """统一错误类型与中文错误文案。
 
-插件 Provider 的异常会被 Host 转成 `success=false`（见报告 §2.5 C5），
+插件 Provider 抛出的异常会被 Host 转成 `success=false`（见报告 §2.5 C5），
+Host 据此把本次模型尝试判为失败、按任务 `model_list` 切到下一个模型。
 所以这里的每条错误都必须带**人类可读的简体中文说明**，方便直接定位问题。
 """
 
@@ -45,7 +46,7 @@ class ErrorCode:
     PACING_COOLDOWN: Final[str] = "pacing_cooldown"
     PACING_QUOTA: Final[str] = "pacing_quota"
     ACCOUNT_RISK: Final[str] = "account_risk"
-    FALLBACK_UNAVAILABLE: Final[str] = "fallback_unavailable"
+    CHANNEL_DISABLED: Final[str] = "channel_disabled"
     NOT_SUPPORTED: Final[str] = "not_supported"
     INTERNAL: Final[str] = "internal"
 
@@ -56,7 +57,7 @@ class DeepEtherError(Exception):
     Attributes:
         code: 稳定的错误码，取自 :class:`ErrorCode`。
         message: 面向用户的中文错误说明。
-        retryable: 本次失败是否值得重试（用于熔断与降级判定）。
+        retryable: 本次失败是否值得重试（用于熔断判定）。
         detail: 供日志使用的补充信息，不直接回给用户。
     """
 

@@ -5,7 +5,7 @@
 
 1. 同一个账号`绝不并发`：acquire() 用 asyncio.Lock 串行化，后来的请求排队等待；
 2. 间隔带`随机抖动`：固定间隔是最容易被周期性检测的特征；
-3. `三级配额`（分/时/日）：任何一级打满都抛 PACING_QUOTA，由上层降级到 Host 官方模型；
+3. `三级配额`（分/时/日）：任何一级打满都抛 PACING_QUOTA，由上层直接失败；
 4. `风控信号驱动退避`：429 冷却 15 分钟、疑似封号冷却 6 小时，且间隔区间自动翻倍（有上限）。
 
 上层（provider.py）只需要三句话：调用前 await acquire(budget_ms=...)，
@@ -20,7 +20,7 @@ import time
 
 from .errors import DeepEtherError, ErrorCode
 
-#: 间隔翻倍的最大值（秒）：再慢下去的等待就该让上层直接降级，而不是把请求挂死。
+#: 间隔翻倍的最大值（秒）：再慢下去的等待就该让上层直接失败，而不是把请求挂死。
 MAX_BACKOFF_INTERVAL_SEC: Final[float] = 120.0
 
 #: 间隔区间最多放大到基线的多少倍（8 倍 × 基线 20s = 160s，已被上一条兜住）。
@@ -193,7 +193,7 @@ class PacingController:
 
         Args:
             budget_ms: 上层剩余预算（毫秒）。预计等待超过预算时立刻抛错，
-                让上层降级，而不是把 Host 请求挂到超时。
+                让上层直接失败，而不是把 Host 请求挂到超时。
 
         Returns:
             float: 实际等待的秒数（未等待返回 0.0）。

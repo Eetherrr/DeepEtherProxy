@@ -85,7 +85,7 @@ def test_circuit_success_closes():
     assert breaker.allow() is True
 
 def test_half_open_probe_slot_can_be_released():
-    """探针请求被取消时必须能归还名额，否则熔断器永久卡在 half_open → 永久降级。"""
+    """探针请求被取消时必须能归还名额，否则熔断器永久卡在 half_open → 永远把请求交回 Host。"""
 
     now = {"value": 0.0}
     breaker = CircuitBreaker(fail_threshold=1, cooldown_sec=10, clock=lambda: now["value"])
@@ -96,7 +96,7 @@ def test_half_open_probe_slot_can_be_released():
     assert breaker.state == "half_open"
     assert breaker.allow() is True
     assert breaker.probe_in_flight is True
-    assert breaker.allow() is False  # 探针在飞，其余请求降级
+    assert breaker.allow() is False  # 探针在飞，其余请求交回 Host 切换
 
     breaker.abort_probe()  # 模拟探针请求被取消
     assert breaker.probe_in_flight is False

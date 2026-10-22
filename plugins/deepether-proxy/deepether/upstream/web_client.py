@@ -2,7 +2,7 @@
 
 一次完整调用 = 建会话 → 领 PoW 挑战 → 本地求解 → POST completion 读 SSE 增量。
 本模块只负责 HTTP 与流式读取，把结果交给 `SseAccumulator`；错误统一转成中文
-`DeepEtherError`，方便上层决定"重试 / 降级 / 提示用户"。
+`DeepEtherError`，方便上层决定"重试 / 直接失败 / 提示用户"。
 """
 
 from pathlib import Path

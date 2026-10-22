@@ -19,8 +19,8 @@ _REQUIRED_CHALLENGE_KEYS: Final[tuple[str, ...]] = ("challenge", "salt", "diffic
 # deepseek-pow 的 wasm 求解器是**进程内共享实例**，不是线程安全的。
 # 并发求解会互相踩线性内存，实测 2 路并发时约一半请求 trap
 # （wasm trap: out of bounds memory access / call stack exhausted），
-# 表现为 pow_failed → 降级到官方模型，等于并发越高越用不了网页版（P2 演练实测）。
-# 求解只要 ~100ms，加一把锁串行化即可，代价远小于误降级。
+# 表现为 pow_failed → 本次调用失败，等于并发越高越用不了网页版（P2 演练实测）。
+# 求解只要 ~100ms，加一把锁串行化即可，代价远小于误判失败。
 _SOLVE_LOCK: Final[threading.Lock] = threading.Lock()
 
 

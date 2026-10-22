@@ -1,5 +1,52 @@
 # 更新日志
 
+## 0.3.1（2026-10-22）
+
+**主要功能**
+
+- **自动注册不再创建 `deepether-planner`**：planner 依赖工具调用（function calling），网页版无法承担，
+  默认只注册 `deepether-replyer` / `deepether-utils`；`planner` 继续使用官方模型
+
+**细节**
+
+- 升级后自动清理旧版遗留的 `deepether-planner` 模型定义，以及所有任务 `model_list` 里对它的引用
+- `wire_tasks` 收紧：`emoji` 与 `planner` 一样列为不支持（分别需要视觉 / 工具调用），只允许纯文本任务
+  （`replyer` / `utils` / `memory` / `mid_memory` / `fast_model` / `learner`）；写进不支持的任务会跳过并给中文告警
+- 接线 `memory` / `mid_memory` / `learner` / `fast_model` 时，自动注册结果里会给出一条对应的风险提示
+  （JSON 输出格式不稳会被静默丢弃 / `fast_model` 处在回复等待路径上）；可选任务复用 `deepether-utils` 模型，
+  不会额外创建模型条目
+- 新增 `docs/TASK-SUITABILITY.md`：各模型任务对纯文本反代的适配性（源码核查结论、推荐策略与开启方式）
+- 版本号 0.3.0 → 0.3.1
+
+## 0.3.0（2026-10-22）
+
+**主要功能**
+
+- **移除插件内 fallback：插件就是普通 Provider，失败交给 MaiBot 的模型调度**。网页版任何失败（凭证缺失/失效、
+  熔断、节奏拒绝、上游 HTTP/超时、PoW、协议异常、空正文）都直接抛带中文说明的 `DeepEtherError`
+  （Runner 转成 `success=false`），与其它模型失败的处理方式一致；插件不再回调 `ctx.llm`，也不再自己重试
+- 删除 `deepether/fallback.py`、配置节 `[fallback]`（`FallbackConfig`）、错误码 `fallback_unavailable`，
+  以及 manifest capabilities 里的 `llm.generate` / `llm.generate_with_tools`（只保留 `send.text`）；
+  新增错误码 `channel_disabled`（`official_only` 下被调用时的明确说明，文案「通道配置为 official_only，本插件不接管网页版调用」）
+- **自动注册写入 `max_retry = 1`**：让这个模型与其它模型一致，失败一次就交给 MaiBot 的模型调度，
+  不在同一模型上重试 3 次（Host 默认 `max_retry = 3`）。已有的 `deepether` 服务商会被就地修正
+- **任务接线按 `behavior.mode` 分支**：`web_first`（默认）把 `deepether-*` 插到 `model_list` 首位并固定 `sequential`；
+  `official_only` 不接线，并把 `deepether-*` 从 `wire_tasks` 对应任务的 `model_list` 里移除（改回 `web_first` 会重新插回首位）；
+  `web_only` **已废弃**，仍接受该字面值（旧配置能加载），行为等同 `web_first`，加载/热更新时打一条中文 warning
+- 接线后若某任务 `model_list` 里只剩 `deepether` 模型，自动注册结果给出 warning：
+  「任务 utils 的 model_list 只有 deepether-utils；该模型失败时这个任务没有其它可选模型，建议在 model_list 末尾补一个官方模型」
+
+**细节**
+
+- 失败日志改为每次失败一条中文 warning：`网页版调用失败（原因：{错误码}: {中文说明}）`
+- 插件加载日志去掉「降级=开/关」等字段，只保留通道 / 思考 / 联网 / 并发上限 / 凭证
+- `/deepether-status` 统计行改为「网页版成功：X 次｜失败：Y 次（最近 24 小时 Z 次）」，删除「降级计数」；
+  反封禁冷却提示改为「期间网页版调用直接失败」；状态命令描述改为「查看 DeepEther Proxy 的凭证、书签与失败统计」
+- 版本号 0.2.4 → 0.3.0（`_manifest.json`、`llm_providers[0].version`、`PROVIDER_VERSION`）；
+  插件配置 `config_version` 0.1.0 → 0.2.0（`[fallback]` 配置节被移除属破坏性变化）
+- 旧 `config.toml` 里的 `[fallback]` 节不需要手工删：Host 检测到配置版本升级时会以插件最新默认配置为骨架重建
+  并落盘，旧的 fallback 字段会消失（预期行为），`credential.web_token` 等仍存在的字段原样保留
+
 ## 0.2.4
 
 **自动注册（插件加载即写好模型配置，不需要手动加服务商/模型）**

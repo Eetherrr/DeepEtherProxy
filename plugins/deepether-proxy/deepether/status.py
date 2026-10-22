@@ -104,8 +104,8 @@ def render_status(
     lines.extend(
         [
             "【统计】",
-            f"网页版成功：{state.web_success} 次｜失败：{state.web_failure} 次"
-            f"｜降级：{state.fallback_count} 次（最近 24 小时 {state.fallbacks_last_24h} 次）",
+            f"网页版成功：{state.web_success} 次"
+            f"｜失败：{state.web_failure} 次（最近 24 小时 {state.failures_last_24h} 次）",
             f"平均耗时：{state.average_latency_ms} ms" if state.average_latency_ms else "平均耗时：暂无数据",
             f"熔断器：{circuit_state}｜进行中：{gate_in_flight}/{gate_limit or '?'}"
             f"｜闸门拒绝：{gate_rejected} 次",
@@ -169,7 +169,7 @@ def _render_pacing(config: DeepEtherProxyConfig, pacing: dict[str, Any] | None) 
     if pacing.get("in_cooldown"):
         lines.append(
             f"冷却中：{pacing.get('cooldown_reason') or '上游风控'}"
-            f"（约 {float(pacing.get('cooldown_remaining_sec') or 0):.0f} 秒后恢复；期间自动走官方模型）"
+            f"（约 {float(pacing.get('cooldown_remaining_sec') or 0):.0f} 秒后恢复；期间网页版调用直接失败）"
         )
     else:
         lines.append("冷却：无")

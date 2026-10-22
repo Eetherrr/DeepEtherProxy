@@ -1,7 +1,14 @@
-"""Provider 编排层：网页通道、失败降级、白名单与 web_only 语义。"""
+"""Provider 编排层：网页通道、失败交回 Host 的契约、并发闸门与熔断。
+
+0.3.0 起插件不再接管 fallback：任何网页版失败都抛 `DeepEtherError`（Runner 转成
+`success=false`），由 Host 按任务 `model_list` + `selection_strategy=sequential`
+切到下一个模型。因此这里的失败用例一律断言「异常原样抛出、失败已计数、
+不碰 Host 的 `ctx.llm`」，而不是断言某种兜底回复。
+"""
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import asyncio
 import logging
@@ -28,33 +35,39 @@ class FakeStore:
         self.state = "invalid"
 
 
-class FakeLLM:
-    """假 ctx.llm。"""
+class CtxWithoutLLM:
+    """只提供 `paths` 的 Host 上下文。
 
-    def __init__(self, success: bool = True):
-        self.success = success
-        self.calls: list[dict] = []
+    0.3.0 起插件不再回调 Host 官方模型，Provider 也不应该再访问 `ctx.llm`；
+    一旦访问就直接让用例失败，把「插件不依赖 Host 回落」变成可执行的契约。
+    """
 
-    async def generate(self, **kwargs):
-        self.calls.append({"method": "generate", **kwargs})
-        return {"success": self.success, "response": "兜底回复", "reasoning": "", "model_name": kwargs.get("model_name")}
+    def __init__(self, tmp_path: Path | None) -> None:
+        self.paths = SimpleNamespace(runtime_dir=tmp_path, data_dir=tmp_path)
 
-    async def generate_with_tools(self, **kwargs):
-        self.calls.append({"method": "generate_with_tools", **kwargs})
-        return {"success": self.success, "response": "兜底回复", "reasoning": ""}
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        raise AssertionError(
+            f"Provider 访问了 Host 上下文 ctx.{name}：0.3.0 起插件不再接管 fallback，"
+            "失败必须直接交回 Host"
+        )
 
 
 class FakePlugin:
     """假插件实例（鸭子类型）。"""
 
-    def __init__(self, config: DeepEtherProxyConfig, *, token: str | None = None, llm=None, tmp_path: Path | None = None):
+    def __init__(
+        self,
+        config: DeepEtherProxyConfig,
+        *,
+        token: str | None = None,
+        tmp_path: Path | None = None,
+    ):
         self.config = config
         self.credential_store = FakeStore(token)
         self.runtime_state = RuntimeState()
-        self.ctx = SimpleNamespace(
-            llm=llm,
-            paths=SimpleNamespace(runtime_dir=tmp_path, data_dir=tmp_path),
-        )
+        self.ctx = CtxWithoutLLM(tmp_path)
 
     def get_logger(self):
         return logging.getLogger("test.provider")
@@ -107,96 +120,151 @@ def _request(task: str = "utils") -> dict:
     }
 
 
-def _config(**fallback_overrides) -> DeepEtherProxyConfig:
+def _config(*, mode: str = "web_first") -> DeepEtherProxyConfig:
     config = DeepEtherProxyConfig()
-    config.fallback.fallback_model_name = fallback_overrides.get("fallback_model_name", "ds-flash")
-    config.fallback.fallback_enabled = fallback_overrides.get("fallback_enabled", True)
-    config.behavior.mode = fallback_overrides.get("mode", "web_first")
+    config.behavior.mode = mode
+    # 节奏控制在 test_antiban.py 单独覆盖；这里关掉，避免每个请求真等 8~20 秒。
+    config.antiban.enabled = False
     return config
 
 
-def _provider(config, client, *, token="tok-123", llm=None, tmp_path=None):
-    plugin = FakePlugin(config, token=token, llm=llm or FakeLLM(), tmp_path=tmp_path)
+def _provider(config, client, *, token="tok-123", tmp_path=None):
+    plugin = FakePlugin(config, token=token, tmp_path=tmp_path)
     provider = DeepEtherProvider(plugin)
     provider._client = client  # noqa: SLF001 - 直接注入假客户端
     return provider, plugin
 
 
+# ─── 成功路径 ───────────────────────────────────────────────────────────
+
+
 def test_web_success_returns_content(tmp_path: Path):
-    provider, plugin = _provider(_config(), FakeClient(), tmp_path=tmp_path)
+    client = FakeClient()
+    provider, plugin = _provider(_config(), client, tmp_path=tmp_path)
+
     result = asyncio.run(provider.get_response(_request()))
+
     assert result["content"] == "网页回复"
     assert result["reasoning_content"] == "网页思考"
     assert plugin.runtime_state.web_success == 1
-    assert plugin.runtime_state.fallback_count == 0
+    assert plugin.runtime_state.web_failure == 0
+    assert plugin.runtime_state.failures_last_24h == 0
+    assert len(client.complete_calls) == 1
 
 
-def test_web_failure_falls_back(tmp_path: Path):
-    error = DeepEtherError("upstream_timeout", "超时", retryable=True)
-    llm = FakeLLM()
-    provider, plugin = _provider(_config(), FakeClient(error=error), llm=llm, tmp_path=tmp_path)
-    result = asyncio.run(provider.get_response(_request()))
-    assert result["content"] == "兜底回复"
-    assert plugin.runtime_state.fallback_count == 1
-    assert llm.calls and llm.calls[0]["model_name"] == "ds-flash"
+# ─── 失败一律交回 Host ──────────────────────────────────────────────────
 
 
-def test_web_only_reraises_original(tmp_path: Path):
-    error = DeepEtherError("upstream_timeout", "超时", retryable=True)
-    provider, plugin = _provider(_config(mode="web_only"), FakeClient(error=error), tmp_path=tmp_path)
+def test_upstream_failure_is_reraised_unchanged_and_counted(tmp_path: Path):
+    """上游错误原样抛出，Host 据此判定本模型失败并切下一个；失败即已交回 Host。"""
+
+    error = DeepEtherError("upstream_timeout", "上游超时", retryable=True)
+    provider, plugin = _provider(_config(), FakeClient(error=error), tmp_path=tmp_path)
+
     with pytest.raises(DeepEtherError) as excinfo:
         asyncio.run(provider.get_response(_request()))
+
+    assert excinfo.value is error  # 不包装成 internal，错误码保持可检索
     assert excinfo.value.code == "upstream_timeout"
-    assert plugin.runtime_state.fallback_count == 0
+    assert plugin.runtime_state.web_failure == 1
 
 
-def test_missing_token_falls_back(tmp_path: Path):
-    llm = FakeLLM()
-    provider, plugin = _provider(_config(), FakeClient(), token=None, llm=llm, tmp_path=tmp_path)
-    result = asyncio.run(provider.get_response(_request()))
-    assert result["content"] == "兜底回复"
-    assert plugin.runtime_state.fallback_count == 1
+def test_missing_token_raises_credential_missing(tmp_path: Path):
+    client = FakeClient()
+    provider, plugin = _provider(_config(), client, token=None, tmp_path=tmp_path)
 
-
-def test_missing_token_without_fallback_model_raises(tmp_path: Path):
-    config = _config()
-    config.fallback.fallback_model_name = ""
-    provider, plugin = _provider(config, FakeClient(), token=None, tmp_path=tmp_path)
     with pytest.raises(DeepEtherError) as excinfo:
         asyncio.run(provider.get_response(_request()))
-    assert excinfo.value.code == "fallback_unavailable"
+
+    assert excinfo.value.code == "credential_missing"
+    assert plugin.runtime_state.web_failure == 1
+    assert client.complete_calls == []  # 没凭证就不该打上游
 
 
-def test_model_not_in_whitelist_reraises(tmp_path: Path):
-    """白名单按模型名生效：不在名单里的模型不会降级，直接失败让 Host 切下一个模型。"""
+def test_thinking_only_response_raises_upstream_empty(tmp_path: Path):
+    """报告 §4.5.3 细节 2：只有思考没有正文必须判失败，不能把空正文当成功交回 Host。"""
 
-    error = DeepEtherError("upstream_timeout", "超时", retryable=True)
-    config = _config()
-    config.fallback.fallback_for_models = ["deepether-utils"]
-    provider, plugin = _provider(config, FakeClient(error=error), tmp_path=tmp_path)
-    with pytest.raises(DeepEtherError) as excinfo:
-        asyncio.run(provider.get_response(_request()))
-    assert excinfo.value.code == "upstream_timeout"
-
-
-def test_thinking_only_response_falls_back(tmp_path: Path):
-    """报告 §4.5.3 细节 2：只有思考没有正文必须判失败，不能把空正文交给 Host。"""
-
-    llm = FakeLLM()
     thinking_only = StreamSnapshot(content="", thinking="我在想")
-    provider, plugin = _provider(_config(), FakeClient(snapshot=thinking_only), llm=llm, tmp_path=tmp_path)
-    result = asyncio.run(provider.get_response(_request()))
-    assert result["content"] == "兜底回复"
-    assert plugin.runtime_state.fallback_count == 1
+    provider, plugin = _provider(_config(), FakeClient(snapshot=thinking_only), tmp_path=tmp_path)
 
-
-def test_thinking_only_without_fallback_raises(tmp_path: Path):
-    config = _config(mode="web_only")
-    thinking_only = StreamSnapshot(content="", thinking="我在想")
-    provider, plugin = _provider(config, FakeClient(snapshot=thinking_only), tmp_path=tmp_path)
     with pytest.raises(DeepEtherError) as excinfo:
         asyncio.run(provider.get_response(_request()))
+
     assert excinfo.value.code == "upstream_empty"
+    assert "思考" in excinfo.value.message
+    assert plugin.runtime_state.web_failure == 1
+
+
+def test_empty_body_raises_upstream_empty(tmp_path: Path):
+    empty = StreamSnapshot(content="", thinking="")
+    provider, plugin = _provider(_config(), FakeClient(snapshot=empty), tmp_path=tmp_path)
+
+    with pytest.raises(DeepEtherError) as excinfo:
+        asyncio.run(provider.get_response(_request()))
+
+    assert excinfo.value.code == "upstream_empty"
+    assert "正文" in excinfo.value.message
+    assert plugin.runtime_state.web_failure == 1
+
+
+def test_circuit_open_raises_circuit_open(tmp_path: Path):
+    """连续失败到阈值后熔断：后续请求直接失败交回 Host，且不再打上游。"""
+
+    config = _config()
+    config.concurrency.circuit_fail_threshold = 1
+    error = DeepEtherError("upstream_timeout", "上游超时", retryable=True)
+    client = FakeClient(error=error)
+    provider, plugin = _provider(config, client, tmp_path=tmp_path)
+
+    with pytest.raises(DeepEtherError) as first_error:
+        asyncio.run(provider.get_response(_request()))
+    assert first_error.value.code == "upstream_timeout"
+    assert provider.circuit_state == "open"
+
+    with pytest.raises(DeepEtherError) as excinfo:
+        asyncio.run(provider.get_response(_request()))
+
+    assert excinfo.value.code == "circuit_open"
+    assert plugin.runtime_state.web_failure == 2  # 两次都是「已交回 Host」
+    assert len(client.complete_calls) == 1
+
+
+def test_official_only_raises_channel_disabled(tmp_path: Path):
+    """official_only 下插件不接管网页版：即使 Host 仍把请求送进来，也立刻交回。"""
+
+    client = FakeClient()
+    provider, plugin = _provider(_config(mode="official_only"), client, tmp_path=tmp_path)
+
+    with pytest.raises(DeepEtherError) as excinfo:
+        asyncio.run(provider.get_response(_request()))
+
+    assert excinfo.value.code == "channel_disabled"
+    assert "official_only" in excinfo.value.message
+    assert plugin.runtime_state.web_failure == 1
+    assert client.complete_calls == []
+
+
+def test_failure_is_observable_without_host(tmp_path: Path):
+    """失败可见性：插件看不到 Host 是否切换成功，所以状态必须自己记录失败。
+
+    `CtxWithoutLLM` 已经保证 Provider 不碰 `ctx.llm`；这里再断言失败计数与
+    最近错误都已落到 runtime_state，供 `/deepether-status` 展示。
+    """
+
+    error = DeepEtherError("upstream_http", "上游返回 502", retryable=True)
+    provider, plugin = _provider(_config(), FakeClient(error=error), tmp_path=tmp_path)
+
+    with pytest.raises(DeepEtherError):
+        asyncio.run(provider.get_response(_request()))
+
+    state = plugin.runtime_state
+    assert state.web_failure == 1
+    assert state.failures_last_24h == 1
+    assert state.last_error == "[upstream_http] 上游返回 502"
+    assert state.last_error_at is not None
+
+
+# ─── 其它协议契约 ───────────────────────────────────────────────────────
 
 
 def test_prompt_style_from_model_extra_params(tmp_path: Path):
@@ -214,15 +282,6 @@ def test_thinking_flag_override_from_model_extra_params(tmp_path: Path):
     request["extra_params"] = {"deepether_thinking": False}
     asyncio.run(provider.get_response(request))
     assert provider._client.complete_calls[0]["thinking_enabled"] is False
-
-
-def test_empty_upstream_triggers_fallback(tmp_path: Path):
-    empty = StreamSnapshot(content="", thinking="")
-    llm = FakeLLM()
-    provider, plugin = _provider(_config(), FakeClient(snapshot=empty), llm=llm, tmp_path=tmp_path)
-    result = asyncio.run(provider.get_response(_request()))
-    assert result["content"] == "兜底回复"
-    assert plugin.runtime_state.fallback_count == 1
 
 
 def test_empty_context_raises_protocol_error(tmp_path: Path):
@@ -248,6 +307,9 @@ def test_embedding_is_not_supported(tmp_path: Path):
     assert excinfo.value.code == "not_supported"
 
 
+# ─── 并发闸门 ───────────────────────────────────────────────────────────
+
+
 class BlockingClient(FakeClient):
     """第一次调用会阻塞，直到测试主动放行——用于制造真实的闸门争用。"""
 
@@ -265,29 +327,35 @@ def test_queue_rejection_does_not_open_circuit(tmp_path: Path):
     """并发闸门拒绝属于本地容量信号，不能计入熔断器的上游连续失败。
 
     否则一次群聊突发就会把熔断打开，让随后 cooldown 内的请求全部绕过网页版，
-    短视频里的排队被放大成 60s 的整段降级（§6.6.1 的触发条件是上游连续失败）。
+    把短视频里的排队放大成 60s 的整段交回 Host（§6.6.1 的触发条件是上游连续失败）。
+    被拒绝的请求同样要抛 `concurrency_rejected`，由 Host 切下一个模型。
     """
 
     config = _config()
     config.concurrency.max_concurrency = 1
     config.concurrency.queue_wait_sec = 1
     config.concurrency.circuit_fail_threshold = 1
-    llm = FakeLLM()
     client = BlockingClient()
-    provider, plugin = _provider(config, client, llm=llm, tmp_path=tmp_path)
+    provider, plugin = _provider(config, client, tmp_path=tmp_path)
 
     async def scenario():
         first = asyncio.create_task(provider.get_response(_request()))
         await asyncio.sleep(0.05)  # 让第一个请求占满唯一槽位
-        rejected = await provider.get_response(_request())
+        rejected: DeepEtherError | None = None
+        try:
+            await provider.get_response(_request())
+        except DeepEtherError as exc:
+            rejected = exc
         client.release_event.set()
         return rejected, await first
 
     rejected, first = asyncio.run(scenario())
 
-    assert rejected["content"] == "兜底回复"
+    assert rejected is not None
+    assert rejected.code == "concurrency_rejected"
     assert first["content"] == "网页回复"
     assert len(client.complete_calls) == 1
-    assert plugin.runtime_state.fallback_count == 1
+    assert plugin.runtime_state.web_failure == 1  # 只有被拒绝的那次失败
+    assert provider.gate_rejected == 1
     # 阈值=1：如果排队拒绝被计入失败，熔断器此刻必然是 open
     assert provider.circuit_state == "closed"

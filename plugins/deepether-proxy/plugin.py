@@ -29,7 +29,7 @@ from .deepether.state import RuntimeState
 from .deepether.status import render_status
 
 CLIENT_TYPE: str = "com.ether.deepether"
-PROVIDER_VERSION: str = "0.2.4"
+PROVIDER_VERSION: str = "0.3.1"
 NONCE_FILE_NAME: str = "nonce.txt"
 BOOKMARKLET_FILE_NAME: str = "bookmarklet.txt"
 
@@ -97,6 +97,7 @@ class DeepEtherProxyPlugin(MaiBotPlugin):
         await self._start_loopback(config, logger)
         self._write_bookmarklet_file(config, logger)
         self._start_periodic_probe(config, logger)
+        self._warn_deprecated_mode(config, logger)
 
         logger.info(
             "DeepEther Proxy 已加载：通道=%s / 思考=%s / 联网=%s / 并发上限=%d / 凭证=%s",
@@ -160,13 +161,15 @@ class DeepEtherProxyPlugin(MaiBotPlugin):
             await self._probe.stop()
             self._probe = None
         self._start_periodic_probe(config, logger)
+        self._warn_deprecated_mode(config, logger)
         self.run_provision()
 
         logger.info(
-            "DeepEther Proxy 配置已更新：通道=%s / 并发上限=%d / 降级=%s / 凭证=%s",
+            "DeepEther Proxy 配置已更新：通道=%s / 思考=%s / 联网=%s / 并发上限=%d / 凭证=%s",
             config.behavior.mode,
+            "开" if config.behavior.thinking_enabled else "关",
+            "开" if config.behavior.search_enabled else "关",
             config.concurrency.max_concurrency,
-            "开" if config.fallback.fallback_enabled else "关",
             self._describe_credential(),
         )
 
@@ -361,6 +364,24 @@ class DeepEtherProxyPlugin(MaiBotPlugin):
         except RuntimeError as exc:
             logger.warning("无法启动定时探活：%s", exc)
 
+    @staticmethod
+    def _warn_deprecated_mode(config: DeepEtherProxyConfig, logger: logging.Logger) -> None:
+        """对 0.3.0 已废弃的 `web_only` 通道打一条中文说明。
+
+        保留 `web_only` 字面值只是为了旧配置能正常加载，行为等同 `web_first`。
+
+        Args:
+            config: 当前配置。
+            logger: 插件日志器。
+        """
+
+        if config.behavior.mode != "web_only":
+            return
+        logger.warning(
+            "behavior.mode=web_only 已废弃：按 web_first 处理。"
+            "要真正只用网页版，请把对应任务的 model_list 只保留 deepether 模型"
+        )
+
     # ─── 自动注册 model_config ──────────────────────────────────────────
 
     def run_provision(self, *, force: bool = False) -> ProvisionResult:
@@ -414,7 +435,7 @@ class DeepEtherProxyPlugin(MaiBotPlugin):
 
     @Command(
         "deepether-status",
-        description="查看 DeepEther Proxy 的凭证、书签与降级统计",
+        description="查看 DeepEther Proxy 的凭证、书签与失败统计",
         pattern=r"^/deepether-status$",
     )
     async def handle_status_command(self, **kwargs: Any) -> tuple[bool, str | None, bool]:
@@ -505,7 +526,7 @@ class DeepEtherProxyPlugin(MaiBotPlugin):
     @LLMProvider(
         CLIENT_TYPE,
         name="DeepEther Proxy",
-        description="DeepSeek 网页版反代 Provider（网页优先、Host 模型兜底）",
+        description="DeepSeek 网页版反代 Provider",
         version=PROVIDER_VERSION,
     )
     async def handle_llm_request(self, operation: str, request: dict[str, Any]) -> dict[str, Any]:

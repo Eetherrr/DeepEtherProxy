@@ -1,7 +1,8 @@
 # DeepEtherProxy 可行性分析报告
 
 > 项目：把 DeepSeek 网页版反代为 MaiBot 的模型能力（MaiBot 第三方插件）
-> 文档版本：v0.2（已并入产品决策：优先网页版 / 官方 API 兜底 / 自动获取凭证 / 个人使用 / 长期稳定）
+> 文档版本：**v0.6**（v0.2 起并入产品决策：优先网页版 / 失败交 MaiBot 模型调度处理 / 自动获取凭证 / 个人使用 / 长期稳定）
+> 修订：v0.6（2026-10-22）——插件 0.3.0 起移除了插件内 fallback（§6.7 标记为已被取代），部署前提见 [plugins/deepether-proxy/README.md](../plugins/deepether-proxy/README.md)；0.3.1 起自动注册不再创建 `deepether-planner`（planner 需要工具调用，网页版做不到）
 > 日期：2026-10-20
 > 核实基线：MaiBot **1.3.11**、**maibot-plugin-sdk 2.12.0**（本机源码实测，非仅依据文档）
 > 工作区：`E:\Dev\EtherTool\DeepEtherProxy`
@@ -505,7 +506,7 @@ def _build_tool_invocation(self, tool_call, latest_thought) -> ToolInvocation:
 
 #### 4.3.4 插件唯一能自主拥有的 loop 是什么
 
-**单次 provider 调用内部，对网页版自身多做几轮上游请求**，最后只把终答交回 Host。
+**单次 provider 调用内部，对网页版自身多做几轮上游请求**，最后只把终答返回给 Host。
 例如让网页版先用它自己的内置搜索查一轮，再基于结果作答。
 
 这说明一个现实边界：插件"能自己实现一份"的工具，只能是**外部能力型工具**（搜索、计算、抓网页）；而 `reply` / `send_emoji` / `stop` / `fetch_history` / `query_memory` 全部依赖 Host 会话状态，**复制不出来**——所以 `planner` 依然无法用"插件自建 loop"替代。
@@ -582,6 +583,9 @@ def _build_tool_invocation(self, tool_call, latest_thought) -> ToolInvocation:
 
 **这个路由能省下大约"除 planner 与多模态外"的全部 token**。按 §4.4.2 的假设，若 planner 占 40%，则约省 60%——**这已经是相当可观的收益，且不需要冒 `planner` 瘫痪的风险**。
 
+> 逐任务的适配性（谁需要工具/视觉、谁要求 JSON、谁在等待路径上）已按 1.3.11 源码重新核查并整理成
+> [docs/TASK-SUITABILITY.md](TASK-SUITABILITY.md)，接任务前以那份结论为准。
+
 > 换句话说：**先拿到 60% 的确定收益，再去赌 P3 那 95% 准确率**，比一上来就全量替换理性得多。
 
 ### 4.5 只接 `replyer` 一个任务是否可行？（已核实：可行，且是最低风险起点）
@@ -617,12 +621,16 @@ max_tokens = 8192
 hard_timeout = 240.0
 ```
 
-> ⚠️ **`selection_strategy` 必须显式设成 `sequential`。** MaiBot 默认值是 `random`，
-> 那样 `model_list` 每轮会随机挑一个模型，约一半调用会静默走官方 API：
-> 用户以为在省 token，实际账目和预期都不对，而且日志里没有降级痕迹（R12）。
+> ⚠️ **`selection_strategy` 必须显式设成 `sequential`。** MaiBot 默认值不是 `sequential`
+> （1.3.11 里是 `balance`；本节初稿记为 `random`，结论不变）：不设成 `sequential` 就无法保证
+> 先走网页版，日志里也没有任何切模型痕迹（R12）。
 > 这也是 P2 演练实测发现的坑（见 `docs/P2-ACCEPTANCE.md`）。
 
-→ **§6.7 的插件内降级在这个场景下是第二层保险，可以放到 P2 再做。**
+→ ~~**§6.7 的插件内降级在这个场景下是第二层保险，可以放到 P2 再做。**~~
+> **0.3.0 修订**：插件内降级已移除（§6.7 整节被取代）。插件就是一个普通 Provider，
+> 失败与其它模型失败一样交给 MaiBot 的模型调度处理；部署时需要把服务商 `max_retry` 设为 1，
+> 让这个模型失败一次就被调度接手。前提见 [plugins/deepether-proxy/README.md](../plugins/deepether-proxy/README.md)
+> 的「部署前提」小节。
 
 #### 4.5.3 五个必须处理的细节
 
@@ -770,9 +778,10 @@ client_type 必须带归属前缀，避免与其他插件冲突（冲突时**双
 ```
 
 - `capabilities` 要**最小化**：纯被动 Provider 用空数组即可（读自己的配置走 `self.config`，不需要 Host 能力）。
-  只有真正调用 `ctx.*` 代理时才逐项声明。本项目因为要做**降级到 Host 模型**（§6.7），必须声明
-  `"capabilities": ["llm.generate"]`（若兜底也要带工具，再加 `llm.generate_with_tools`）。其余如 `database.query`、`send.text` 用到再加。
-  完整清单见 `$MAI/src/plugin_runtime/capabilities/registry.py`（约 80 个能力名）。`ctx.logger` / `ctx.paths` 是 Runner 注入的辅助对象，不需要声明。
+  只有真正调用 `ctx.*` 代理时才逐项声明。完整清单见 `$MAI/src/plugin_runtime/capabilities/registry.py`（约 80 个能力名）。`ctx.logger` / `ctx.paths` 是 Runner 注入的辅助对象，不需要声明。
+  ~~本项目因为要做**降级到 Host 模型**（§6.7），必须声明 `"capabilities": ["llm.generate"]`（若兜底也要带工具，再加 `llm.generate_with_tools`）。~~
+  > **0.3.0 已移除**：插件不再调用 `ctx.llm`，`llm.generate` / `llm.generate_with_tools` 声明已从 manifest 删除，
+  > 只保留 `send.text`（状态命令发消息用）。其余如 `database.query` 用到再加。
 - 依赖 `wasmtime` 时用 `dependencies` 声明 `{"type":"python_package","name":"wasmtime","version_spec":">=20"}`。
 - `max_version` 别锁死小版本（官方建议 999.999.999 + 只认真约束 `min_version`）。
 
@@ -804,21 +813,27 @@ extra_params = { }                          # 思考/联网开关走插件自带
 | 凭证 | `web_token` | 网页版 Bearer token。**可留空**——留空时用 §6.5 的自动获取通道 |
 | 凭证 | `credential_port` | 本地接收凭证的回环端口，默认 18765（仅绑 127.0.0.1） |
 | 凭证 | `health_check_interval` | 探活间隔（分钟），默认 30 |
-| 行为 | `mode` | `web_first`（默认）/ `web_only` / `official_only` |
+| 行为 | `mode` | `web_first`（默认）/ `official_only`；`web_only` **0.3.0 已废弃**（仍接受该字面值、行为等同 `web_first`，加载时打中文 warning） |
 | 行为 | `thinking_enabled` | 是否开思考模式 |
 | 行为 | `search_enabled` | 是否开网页版内置搜索 |
 | 并发 | `max_concurrency` | 默认 2，上限 3（风控） |
 | 超时 | `request_timeout` | 单请求超时，建议 180 |
 | 熔断 | `circuit_fail_threshold` / `circuit_cooldown_sec` | 连续失败 K 次后冷却 M 秒 |
-| 兜底 | `fallback_enabled` | 是否允许自动降级（默认 true） |
-| 兜底 | `fallback_model_name` | **直选 Host 模型名**（MaiBot `model_config.toml` 里已配置的官方模型）；留空则禁用兜底 |
-| 兜底 | `fallback_timeout_ms` | 兜底调用超时，默认 120000 |
-| 兜底 | `fallback_with_tools` | 兜底时是否携带 `tool_options`（`planner` 兜底需要，默认 true） |
-| 兜底 | `fallback_for_tasks` | 允许降级的任务白名单；**默认不含 `planner`**（避免静默改变行为） |
-
-> **兜底不配置 key、不配置 base_url**：插件通过 `ctx.llm.generate(...)` 回调 Host，复用 MaiBot 已经配好的 `api_providers`（key、base_url、超时、重试、计费统计全部复用）。详见 §6.7。
 | 调试 | `dump_request` | 落盘真实 request 到 `runtime_dir`，用于契约测试 |
 | 调试 | `verbose_log` | 打印上游链路耗时 |
+| 兜底 | ~~`fallback_enabled`~~ | **0.3.0 已移除**：插件不再内置 fallback（原：是否允许自动降级，默认 true） |
+| 兜底 | ~~`fallback_model_name`~~ | **0.3.0 已移除**：模型选择与失败处理交给 MaiBot 的模型调度（原：直选 Host 模型名） |
+| 兜底 | ~~`fallback_timeout_ms`~~ | **0.3.0 已移除**：不再有插件内兜底调用，也就没有这一层超时（原：兜底调用超时 120000） |
+| 兜底 | ~~`fallback_with_tools`~~ | **0.3.0 已移除**：manifest 的 `llm.generate_with_tools` 能力声明一并删除（原：兜底时是否携带 `tool_options`） |
+| 兜底 | ~~`fallback_for_tasks`~~ | **0.3.0 已移除**：白名单等价于"哪些任务接 `deepether` 模型"，现在由 `[provision] wire_tasks` 与任务 `model_list` 表达 |
+
+> **0.3.0 说明**：插件就是一个普通 Provider，模型选择与失败处理都交给 MaiBot 的模型调度（与其它模型一致）。
+> 部署时把 `api_providers[].max_retry` 设为 1、任务 `model_list` 里保留其它模型、
+> `selection_strategy = sequential` 即可，见 [plugins/deepether-proxy/README.md](../plugins/deepether-proxy/README.md) 的「部署前提」。
+> 插件里仍然不配置 key、不配置 base_url，也不再回调 `ctx.llm`。
+
+> **（0.2.x 原文，保留作历史记录）兜底不配置 key、不配置 base_url**：插件通过 `ctx.llm.generate(...)` 回调 Host，
+> 复用 MaiBot 已经配好的 `api_providers`（key、base_url、超时、重试、计费统计全部复用）。详见 §6.7。
 
 ---
 
@@ -873,7 +888,7 @@ nonce 由插件生成并显示在 WebUI 状态页（或 `/deepehter-status` 命�
 #### 6.5.4 凭证失效与续期
 
 - **探活**：每 `health_check_interval` 分钟（默认 30）打一次轻量接口（如 `/api/v0/users/current`）判断 token 是否仍有效。
-- **失效处理**：进入"待授权"状态，通过 `/deepehter-status` 与日志用中文明确提示"请重新打开网页点一次书签"，并**自动降级到官方 API**（若开启）。
+- **失效处理**：进入"待授权"状态，通过 `/deepether-status` 与日志用中文明确提示"请重新打开网页点一次书签"；本次调用失败，与其它模型失败一样交给 MaiBot 的模型调度处理。
 - **自动续期**：网页版是否存在 refresh 机制**尚未核实**。设计上先做"失效快速告知 + 一键重新授权"，把续期当作加分项而不是前提。
 - **落盘**：保存到 `data/plugins/<plugin_id>/credential.json`（插件专属目录），日志中**永不打印完整 token**（只打印前 4 位 + 长度）。
 
@@ -883,7 +898,7 @@ nonce 由插件生成并显示在 WebUI 状态页（或 `/deepehter-status` 命�
 
 ### 6.6 长期稳定性设计（比反代本身更重要）
 
-要求"长期稳定"，就必须假设**上游一定会坏**：token 会过期、协议会改、风控会拦、账号可能被封。稳定性设计的目标不是"不出故障"，而是**出故障时自动降级、且用户能看见**。
+要求"长期稳定"，就必须假设**上游一定会坏**：token 会过期、协议会改、风控会拦、账号可能被封。稳定性设计的目标不是"不出故障"，而是**出故障时如实报错、且用户能看见**（是否换模型由 MaiBot 的模型调度决定）。
 
 #### 6.6.1 五层防线
 
@@ -891,17 +906,20 @@ nonce 由插件生成并显示在 WebUI 状态页（或 `/deepehter-status` 命�
 |---|---|---|---|
 | **凭证层** | 定时探活 + 失效自愈 | token 401/403 | 标记待授权 → 中文告警 → 可一键重新获取 |
 | **协议层** | 启动自检 + 漂移检测 | 建会话/PoW/首增量任一失败 | 记录失败指纹；连续 N 次同类失败 → 判定"协议可能变更"，给出明确日志 |
-| **流量层** | 并发信号量 + 排队超时预估 + 熔断 | 并发达上限 / 连续失败 K 次 | 拒绝新请求走降级；冷却 M 秒后重试 |
-| **降级层** | 自动切 Host 已配置的官方模型（§6.7） | 上述任一层失败 | 按 `fallback_for_tasks` 白名单降级，**并记录降级计数** |
-| **观测层** | `/deepehter-status` + 结构化日志 | 随时 | 一眼看出：凭证状态、最近失败、降级次数、平均耗时 |
+| **流量层** | 并发信号量 + 排队超时预估 + 熔断 | 并发达上限 / 连续失败 K 次 | 拒绝新请求（本次调用失败）；冷却 M 秒后重试 |
+| **失败层** | 插件失败即返回错误（与其它模型一致） | 上述任一层失败 | 抛带中文说明的错误 → `success:false`；后续由 MaiBot 的模型调度处理，插件只记录自己这条通道的失败计数 |
+| **观测层** | `/deepether-status` + 结构化日志 | 随时 | 一眼看出：凭证状态、最近失败、失败次数、平均耗时 |
 
-#### 6.6.2 "降级必须可见"（最容易做错的一条）
+#### 6.6.2 "失败必须可见"（最容易做错的一条）
 
-静默降级的后果：用户以为在省 token，实际上一直在烧官方额度，而且**行为特性也变了**（工具调用能力突然回来）。因此：
+静默吞错的后果：用户以为在省钱，实际上一直在烧官方额度，而且**行为特性也变了**（工具调用能力突然回来）。因此：
 
-- 每次降级都打一条**中文 warning**，包含原因（凭证失效 / 超时 / 熔断）；
-- `/deepehter-status` 显示"最近 24 小时降级 N 次"；
-- 可选：降级比例超过阈值时，通过 `ctx.send` 主动提醒一次（每会话限频）。
+- 每次失败都打一条**中文 warning**，带错误码与中文说明；
+- `/deepether-status` 显示「网页版成功：X 次｜失败：Y 次（最近 24 小时 Z 次）」——插件只统计自己这条通道，
+  最终换不换模型、换到哪个模型，由 MaiBot 的模型调度决定，插件不参与也不统计；
+- 可选：失败比例超过阈值时，通过 `ctx.send` 主动提醒一次（每会话限频）。
+
+> 0.2.x 的「降级计数」随插件内 fallback 一并移除（0.3.0）：失败计数加一即代表这条请求在网页版通道上已经失败。
 
 #### 6.6.3 自检清单（启动时 + 每小时）
 
@@ -912,6 +930,9 @@ nonce 由插件生成并显示在 WebUI 状态页（或 `/deepehter-status` 命�
 ④ 能收到首个增量            → 否则"SSE 解析可能变更"
 ⑤ 兜底通道可用（如开启）    → 否则"降级不可用"，提高告警级别
 ```
+
+> **0.3.0**：⑤ 不再适用——插件不内置 fallback，"有没有可用的其它模型"取决于任务的 `model_list`，
+> 由自动注册结果里的 warning 提示（`任务 utils 的 model_list 只有 deepether-utils；该模型失败时这个任务没有其它可选模型…`）。
 
 任一失败都不应该让插件崩溃——插件抛异常只会转成 `success:false`（§2.5 C5），用户看到的是"麦麦不回话了"，非常难排查。
 
@@ -927,6 +948,15 @@ nonce 由插件生成并显示在 WebUI 状态页（或 `/deepehter-status` 命�
 ---
 
 ### 6.7 降级怎么走：复用 MaiBot 自己的模型配置（已确认为可行方案）
+
+> ⚠️ **已被取代（0.3.0，2026-10-22）：插件内降级已移除。**
+> 本节描述的是 0.2.x 的实现（插件通过 `ctx.llm.generate(...)` 回调 Host 直选官方模型）。
+> 0.3.0 起插件就是一个普通 LLM Provider：失败时直接返回带中文说明的错误，
+> 与其它模型失败一样交给 MaiBot 的模型调度处理，插件不参与选模型；
+> `deepether/fallback.py`、`[fallback]` 配置节、`fallback_unavailable` 错误码、
+> manifest 的 `llm.generate*` 能力声明全部删除，服务商改为写入 `max_retry = 1`。
+> **部署时需要的三项设置见 [plugins/deepether-proxy/README.md](../plugins/deepether-proxy/README.md) 的「部署前提」小节。**
+> 本节以下内容保留作历史记录（决策理由、当时的三个坑仍有参考价值）。
 
 > 你的问题是："官方兜底能否回退到 MaiBot 自身设置的模型设置？"
 > **答案：能，而且比插件自己配 key 更好。** 下面是核实结果。
@@ -1047,7 +1077,7 @@ WebUI 首次启动会在日志里打印登录 Token（`[WebUI应用] 🔑 WebUI 
 | **P1 打通** | **先只接 `replyer`** 跑通（§4.5）：`context_items` → prompt → 网页版 → 纯文本；用 `model_list` 主备兜底。跑稳后再扩 `utils` / `mid_memory` | adapter_in/out、web_client、pow 封装 | 2–3 天 |
 | **P2 稳定** | 并发闸门、排队预估、熔断、**自动降级官方 API**、启动/定时自检、降级可见（§6.6） | openai_fallback、circuit breaker、status 命令 | 2–3 天 |
 | **P2.5 反封禁** | 让网页版通道"看起来像人在用"：串行 + 抖动间隔 + 三级配额 + 风控信号分类 + 会话复用 + 指纹自洽 + 节奏状态落盘（§7.2、`docs/ANTIBAN.md`） | `antiban.py`（PacingController / classify_failure）、`[antiban]` 配置节、状态命令新增段落 | 1–2 天（**上线前必做**） |
-| **P2.6 自动注册** | 插件加载时自动把 Provider 与三个预设模型写进 Host 的 `config/model_config.toml`，并把 `replyer`/`utils` 接到 sequential 主备列表首位；Host 文件监视热重载、无需重启（§7.3） | `deepether/provision.py`、`[provision]` 配置节、`/deepether-setup` 命令、17 条单测 | 0.5 天 |
+| **P2.6 自动注册** | 插件加载时自动把 Provider 与预设模型写进 Host 的 `config/model_config.toml`，并把 `replyer`/`utils` 接到 sequential 主备列表首位；Host 文件监视热重载、无需重启（§7.3）。0.3.1 起只注册两个模型（不再创建 `deepether-planner`） | `deepether/provision.py`、`[provision]` 配置节、`/deepether-setup` 命令、17 条单测 | 0.5 天 |
 | **P3 工具 shim** | 提示词级 tool_calls 模拟：`tool_options` 注入 → 解析 JSON → `FunctionCallItem` 交 Host 执行（边界见 §4.3） | tool_emu + 准确率回归集 | 3–5 天（不确定性最高） |
 | **P4 收尾** | i18n、README、"上游改版排查 5 步"、发布准备 | 文档 + 测试报告 | 1–2 天 |
 
@@ -1056,10 +1086,10 @@ WebUI 首次启动会在日志里打印登录 Token（`[WebUI应用] 🔑 WebUI 
 | 判定项 | 标准 |
 |---|---|
 | 凭证 | 连续 7 天无需手动干预；过期后 30 分钟内能发现并提示 |
-| 可用性 | 网页版不可用时，麦麦**照常回复**（走官方兜底），用户只看到一条 warning |
-| 可观测 | 一条命令看出：凭证状态、最近失败原因、24h 降级次数、平均耗时 |
-| 不静默 | 任何降级都有中文日志，且计数可见 |
-| 不雪崩 | 群聊突发 20 条消息时，不会全部超时——超出的直接走兜底 |
+| 可用性 | 网页版不可用时，麦麦**照常回复**（由 MaiBot 的模型调度处理），插件侧只留一条 warning |
+| 可观测 | 一条命令看出：凭证状态、最近失败原因、最近 24 小时失败次数、平均耗时 |
+| 不静默 | 任何失败都有中文日志，且计数可见 |
+| 不雪崩 | 群聊突发 20 条消息时，不会全部超时——超出并发闸门的请求立即失败，不在上游排队 |
 | replyer 专项 | 空回复 0 次；平均耗时 < 15s；`model_list` 主备切换在日志中可见（§4.5.5） |
 
 **这五项达标，项目就算成功；P3 只是把省的钱从 60% 提到接近 100%。**
@@ -1073,9 +1103,9 @@ P2.6 让插件自己写：
 | 动作 | 细节 |
 |---|---|
 | 定位配置 | 显式 `model_config_path` → `DEEPETHER_MODEL_CONFIG` → `MAIBOT_INSTANCE_DIR` → 插件目录向上找实例根 |
-| 写 Provider | `name=deepether`、`base_url=plugin://com.ether.deepether`、`client_type=com.ether.deepether`、`auth_type=none`、`api_key=""`、`timeout=300` |
-| 写模型 | `deepether-replyer`（replyer 风格、不思考）、`deepether-planner`（开思考）、`deepether-utils`（不思考） |
-| 接线任务 | `replyer`/`utils` 的 `model_list` 首位插入对应模型，`selection_strategy` 固定 `sequential`；`planner` 默认不接 |
+| 写 Provider | `name=deepether`、`base_url=plugin://com.ether.deepether`、`client_type=com.ether.deepether`、`auth_type=none`、`api_key=""`、`timeout=300`、`max_retry=1`（0.3.0 新增：与其它模型一致，失败由 MaiBot 的模型调度接手） |
+| 写模型 | `deepether-replyer`（replyer 风格、不思考）、`deepether-utils`（不思考）；**不注册 `deepether-planner`**（planner 需要工具调用，网页版做不到），旧版遗留的该模型会被清理 |
+| 接线任务 | `replyer`/`utils` 的 `model_list` 首位插入对应模型，`selection_strategy` 固定 `sequential`；`planner` 不接线（`wire_tasks` 里写 planner 会被忽略并告警） |
 | 安全 | 先备份（最多 5 份）→ tomlkit 修改 → tomllib 复核 → `.tmp` + `os.replace` 原子替换；无变化不落盘（避免反复热重载） |
 | 生效 | Host 的 FileWatcher 监听 `model_config.toml`（`src\config\config.py`），写完自动 `reload_config(scope=model)` |
 
@@ -1099,7 +1129,7 @@ P2.5 的交付物（0.2.3 已全部落地）：
 | 会话复用 | `web_client.acquire_session(reuse_limit)` | 8 次 |
 | 指纹自洽 + 可选 h2 | `constants.BROWSER_XHR_HEADERS`、`_HTTP2_AVAILABLE` | 不伪造私有头 |
 | 状态落盘（重启不加刑） | `runtime_dir/antiban_state.json` + `cooldown_until_wall` | 原子写 |
-| 降级不变差 | `acquire` 抛 `PACING_COOLDOWN/QUOTA` → 直接走 Host 模型 | 对话不断线 |
+| 失败不拖累对话 | `acquire` 抛 `PACING_COOLDOWN/QUOTA` → 本次调用直接失败（0.3.0 起插件不内置兜底调用，由 MaiBot 的模型调度处理） | 对话不断线 |
 
 设计取舍与"明确不做的手段"（代理池、随机 UA、伪造 cookie、多实例共用 token、PoW 抢跑）见 `docs/ANTIBAN.md` §5。
 
@@ -1247,7 +1277,7 @@ New-Item -ItemType Junction -Path "E:\Dev\NapCat\NapCatData\apps\maibot\73fc1ca9
 | 范围 | 仅个人使用 | §0.1、§8（可砍多租户/权限） |
 | 稳定性 | 必须长期稳定 | §6.6、§7.1 日用门槛 |
 | 测试实例 | **不碰日用实例**，在工作区自建一个 | §6.8（已部署完成，已验证可运行） |
-| 官方兜底 | **复用 MaiBot 自己的模型配置**（不额外配 key） | §6.7（源码核实可行） |
+| 官方兜底 | ~~**复用 MaiBot 自己的模型配置**（不额外配 key）~~ → **0.3.0 移除插件内 fallback**：与其它模型一样由 MaiBot 的模型调度处理 | §6.7（历史）、插件 README「部署前提」（现行） |
 
 ### 10.2 动手前建议先做的 30 分钟验证实验
 
@@ -1324,3 +1354,4 @@ New-Item -ItemType Junction -Path "E:\Dev\NapCat\NapCatData\apps\maibot\73fc1ca9
 | v0.3 | 2026-10-20 | ① 新增 §6.7：降级改为**复用 Host 已配置模型**（源码核实可行，插件不存 key），含递归/超时/prompt 形态三个坑；② 新增 §6.8：在工作区自建测试实例并**实测通过**（含 stdin EOF 导致退出的坑）；③ §6.4 兜底配置改为 `fallback_model_name`；④ §6.6 降级层措辞同步；⑤ §6.3 capabilities 增加 `llm.generate`；⑥ §8 新增 R16 降级递归、R17 超时叠加；⑦ §10 记录"测试实例"与"兜底方案"决策，剩余问题收敛为 4 项 |
 | v0.4 | 2026-10-20 | ① 新增 §4.5：**只接 `replyer` 单任务的可行性**（源码核实：无 tools、无 response_format、`visual=false` 不带图、240s 超时），含 `model_list` 自带主备切换、五个必须处理的细节、收益定位与一周观察指标；② §4.4.3 路由表加交叉引用；③ §0 推荐路线与 §7 P1 收窄为"先只接 replyer"；④ §7.1 日用门槛新增 replyer 专项 |
 | v0.5（待定） | — | 待验证实验回填：网页版现状、`tools` 字段是否被接受、端到端耗时、浏览器能否向回环地址 POST 凭证；以及测试实例的消息注入路径（§6.8.4） |
+| v0.6 | 2026-10-22 | 插件 0.3.0 起**移除了插件内 fallback**（作为普通 Provider，失败由 MaiBot 的模型调度处理）：① §6.7 顶部标记"已被取代"，删除插件内 fallback、`[fallback]` 配置节、`fallback_unavailable`、manifest 的 `llm.generate*` 声明；② §6.6.1 失败层与 §6.6.2 措辞收敛为"插件失败即返回错误，由 MaiBot 模型调度处理（与其它模型一致）"，统计口径改为成功/失败计数；③ §6.4 配置表把 `mode` 的 `web_only` 标为废弃、`fallback_*` 五行标为已移除；④ §4.5.2 补部署前提 `max_retry = 1`；⑤ §6.3 标注 `llm.generate` 能力已移除；⑥ fallback 相关说明收敛到插件 README 的「部署前提」小节。**理由：职责单一、不重复 Host 已有能力、避免递归与超时叠加两处硬编码。** |

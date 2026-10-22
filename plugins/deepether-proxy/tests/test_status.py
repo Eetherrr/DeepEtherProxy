@@ -87,7 +87,7 @@ def test_status_shows_counts(tmp_path: Path):
     store.save("tok-1", SOURCE_BOOKMARKLET)
     state = RuntimeState()
     state.record_success(1200)
-    state.record_fallback("上游超时")
+    state.record_failure("upstream_timeout", "上游超时")
     text = render_status(
         version="0.1.0",
         config=config,
@@ -97,18 +97,19 @@ def test_status_shows_counts(tmp_path: Path):
         loopback_port=18765,
         nonce="n",
     )
-    assert "降级：1 次" in text
+    assert "网页版成功：1 次｜失败：1 次（最近 24 小时 1 次）" in text
     assert "1200 ms" in text
 
+
 def test_status_shows_24h_window_and_gate_rejections(tmp_path: Path):
-    """报告 §6.6.2 / §7.1：状态里要能一眼看到 24 小时降级与闸门拒绝次数。"""
+    """报告 §6.6.2 / §7.1：状态里要能一眼看到 24 小时失败与闸门拒绝次数。"""
 
     config = DeepEtherProxyConfig()
     store = CredentialStore(tmp_path, logging.getLogger("test"))
     store.save("tok-1", SOURCE_BOOKMARKLET)
     state = RuntimeState()
-    state.record_fallback("上游超时")
-    state.record_fallback("并发已满")
+    state.record_failure("upstream_timeout", "上游超时")
+    state.record_failure("concurrency_rejected", "并发已满")
     text = render_status(
         version="0.1.0",
         config=config,
@@ -119,6 +120,7 @@ def test_status_shows_24h_window_and_gate_rejections(tmp_path: Path):
         nonce="n",
         gate_rejected=7,
     )
-    assert "降级：2 次（最近 24 小时 2 次）" in text
+    assert "失败：2 次（最近 24 小时 2 次）" in text
     assert "闸门拒绝：7 次" in text
-    assert state.fallbacks_last_24h == 2
+    assert state.failures_last_24h == 2
+    assert "降级" not in text  # 不暴露"降级/回落"概念：插件只是普通模型通道

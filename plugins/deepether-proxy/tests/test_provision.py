@@ -80,6 +80,8 @@ def test_registers_provider_models_and_wires_tasks(tmp_path: Path) -> None:
     assert parsed["api_providers"][1]["client_type"] == "com.ether.deepether"
     assert parsed["api_providers"][1]["auth_type"] == "none"
     assert parsed["api_providers"][1]["timeout"] == 300
+    # max_retry=1：Host 默认 3 会把一次失败放大成 3 次尝试（每次还要等反封禁间隔）。
+    assert parsed["api_providers"][1]["max_retry"] == 1
 
     models = {item["name"]: item for item in parsed["models"]}
     assert set(models) == {"deepseek-v4-flash"} | {plan.name for plan in DEFAULT_PLAN}
@@ -87,8 +89,9 @@ def test_registers_provider_models_and_wires_tasks(tmp_path: Path) -> None:
         "deepether_style": "replyer",
         "deepether_thinking": False,
     }
-    assert models["deepether-planner"]["extra_params"]["deepether_thinking"] is True
     assert models["deepether-utils"]["api_provider"] == "deepether"
+    # planner 需要 function calling，网页版做不到：默认不注册它的模型。
+    assert "deepether-planner" not in models
 
     replyer = parsed["model_task_config"]["replyer"]
     assert replyer["model_list"] == ["deepether-replyer", "deepseek-v4-flash"]
@@ -127,6 +130,7 @@ base_url = "plugin://wrong"
 client_type = "com.ether.deepether"
 auth_type = "bearer"
 timeout = 60
+max_retry = 3
 """
     root = _write_root(tmp_path, text)
     result = _provision(root)
@@ -138,6 +142,57 @@ timeout = 60
     assert ours[0]["base_url"] == "plugin://com.ether.deepether"
     assert ours[0]["auth_type"] == "none"
     assert ours[0]["timeout"] == 300
+    # 旧配置里的 max_retry=3 必须被纠正成 1，否则网页版失败后会在同一模型上重试。
+    assert ours[0]["max_retry"] == 1
+
+
+def test_official_only_detaches_wired_tasks(tmp_path: Path) -> None:
+    """切到 official_only 后必须把 deepether 模型移出任务 model_list，让 Host 直接走官方模型。"""
+
+    root = _write_root(tmp_path)
+    assert _provision(root, ProvisionSettings(mode="web_first")).changed
+    before = _parsed(root)
+    assert before["model_task_config"]["replyer"]["model_list"] == ["deepether-replyer", "deepseek-v4-flash"]
+    assert before["model_task_config"]["replyer"]["selection_strategy"] == "sequential"
+
+    # selection_strategy 故意给一个与接线要求不同的值：detach 分支不应再写选择策略。
+    result = _provision(root, ProvisionSettings(mode="official_only", selection_strategy="random"))
+
+    assert result.ok and result.changed
+    parsed = _parsed(root)
+    assert parsed["model_task_config"]["replyer"]["model_list"] == ["deepseek-v4-flash"]
+    assert parsed["model_task_config"]["replyer"]["selection_strategy"] == "sequential"
+    assert parsed["model_task_config"]["utils"]["model_list"] == []
+    # 移除后 model_list 为空时必须告警，而不是让用户以为还在用网页版。
+    assert any("为空" in item and "utils" in item for item in result.warnings)
+
+
+def test_warns_when_task_has_no_fallback_model(tmp_path: Path) -> None:
+    """web_first 接线后如果任务只剩 deepether 模型，该模型失败时任务没有其它可选模型，必须告警。"""
+
+    # BASE_TOML 里 utils 的 model_list 为空：接线后只剩 deepether-utils。
+    root = _write_root(tmp_path)
+    result = _provision(root)
+
+    assert result.ok
+    parsed = _parsed(root)
+    assert parsed["model_task_config"]["utils"]["model_list"] == ["deepether-utils"]
+    assert any("没有其它可选模型" in item for item in result.warnings)
+    assert any("utils" in item for item in result.warnings if "没有其它可选模型" in item)
+
+
+def test_web_only_is_treated_as_web_first(tmp_path: Path) -> None:
+    """web_only 已废弃：接线行为与 web_first 完全一致。"""
+
+    root_web_first = _write_root(tmp_path / "a")
+    root_web_only = _write_root(tmp_path / "b")
+    first = _provision(root_web_first, ProvisionSettings(mode="web_first"))
+    second = _provision(root_web_only, ProvisionSettings(mode="web_only"))
+
+    assert first.ok and second.ok
+    text_first = (root_web_first / "config" / "model_config.toml").read_text(encoding="utf-8")
+    text_web_only = (root_web_only / "config" / "model_config.toml").read_text(encoding="utf-8")
+    assert text_first == text_web_only
 
 
 def test_model_name_conflict_skips_only_that_model(tmp_path: Path) -> None:
@@ -235,10 +290,90 @@ def test_keep_backup_false_writes_nothing_extra(tmp_path: Path) -> None:
 
 
 def test_parse_wire_tasks_accepts_separators() -> None:
-    assert parse_wire_tasks("replyer, planner；utils") == ("replyer", "planner", "utils")
+    # planner 会被跳过（网页版没有工具调用能力），其余任务正常解析。
+    assert parse_wire_tasks("replyer, planner；utils") == ("replyer", "utils")
     assert parse_wire_tasks("") == ()
     assert parse_wire_tasks(None) == ()
     assert parse_wire_tasks(("replyer", "replyer")) == ("replyer",)
+
+
+def test_parse_wire_tasks_skips_planner() -> None:
+    """planner（工具调用）与 emoji（视觉）网页版做不到：不报错、但绝不接线。"""
+
+    assert parse_wire_tasks("planner") == ()
+    assert parse_wire_tasks(("planner", "utils")) == ("utils",)
+    assert parse_wire_tasks("emoji") == ()
+    assert parse_wire_tasks("emoji,memory") == ("memory",)
+
+
+def test_settings_from_config_reports_ignored_planner() -> None:
+    section = SimpleNamespace(
+        provider_name="deepether",
+        model_config_path="",
+        wire_tasks="replyer,planner",
+        keep_backup=True,
+        selection_strategy="sequential",
+    )
+    settings = settings_from_config(
+        SimpleNamespace(provision=section, behavior=SimpleNamespace(mode="web_first"))
+    )
+
+    assert settings.wire_tasks == ("replyer",)
+    assert "planner" in settings.wire_note
+
+
+def test_planner_wire_warning_and_no_wiring(tmp_path: Path) -> None:
+    """即使直接构造 wire_tasks 带 planner/emoji，也只告警、不接线。"""
+
+    root = _write_root(tmp_path)
+    result = _provision(root, ProvisionSettings(wire_tasks=("replyer", "planner", "emoji")))
+
+    assert result.ok
+    assert any("planner" in item and "工具调用" in item for item in result.warnings)
+    assert any("emoji" in item and "视觉" in item for item in result.warnings)
+    assert _parsed(root)["model_task_config"]["replyer"]["model_list"][0] == "deepether-replyer"
+
+
+def test_opt_in_task_caveat_warning(tmp_path: Path) -> None:
+    """接线可选用任务（如 mid_memory）时，要给出 JSON 输出风险提示。"""
+
+    text = BASE_TOML + """
+[model_task_config.mid_memory]
+model_list = []
+selection_strategy = "random"
+"""
+    root = _write_root(tmp_path, text)
+    result = _provision(root, ProvisionSettings(wire_tasks=("mid_memory",)))
+
+    assert result.ok
+    assert any("mid_memory" in item and "JSON" in item for item in result.warnings)
+    assert _parsed(root)["model_task_config"]["mid_memory"]["model_list"] == ["deepether-utils"]
+
+
+def test_legacy_planner_model_is_removed(tmp_path: Path) -> None:
+    """0.3.0 及更早会注册 deepether-planner；升级后必须清掉模型定义与所有任务接线。"""
+
+    text = BASE_TOML + """
+[[models]]
+model_type = "llm"
+model_identifier = "deepseek-web"
+name = "deepether-planner"
+api_provider = "deepether"
+
+[model_task_config.planner]
+model_list = ["deepether-planner", "deepseek-v4-flash"]
+selection_strategy = "sequential"
+"""
+    root = _write_root(tmp_path, text)
+    result = _provision(root)
+
+    assert result.ok
+    parsed = _parsed(root)
+    assert "deepether-planner" not in {item["name"] for item in parsed["models"]}
+    assert parsed["model_task_config"]["planner"]["model_list"] == ["deepseek-v4-flash"]
+    assert any("deepether-planner" in item for item in result.applied)
+    # 幂等：清理过一次之后不应再有改动
+    assert _provision(root).changed is False
 
 
 def test_parse_wire_tasks_rejects_unknown() -> None:
@@ -252,6 +387,7 @@ def test_settings_from_config_defaults_when_section_missing() -> None:
     assert settings.provider_name == "deepether"
     assert settings.wire_tasks == ("replyer", "utils")
     assert settings.keep_backup is True
+    assert settings.mode == "web_first"
 
 
 def test_settings_from_config_reads_section() -> None:
@@ -268,6 +404,24 @@ def test_settings_from_config_reads_section() -> None:
     assert settings.wire_tasks == ("replyer",)
     assert settings.keep_backup is False
     assert settings.selection_strategy == "balance"
+
+
+def test_settings_from_config_reads_mode() -> None:
+    """通道模式来自 behavior.mode：official_only 决定接线时是插入还是移除模型。"""
+
+    section = SimpleNamespace(
+        provider_name="deepether",
+        model_config_path="",
+        wire_tasks="replyer",
+        keep_backup=True,
+        selection_strategy="sequential",
+    )
+    settings = settings_from_config(
+        SimpleNamespace(provision=section, behavior=SimpleNamespace(mode="official_only"))
+    )
+
+    assert settings.mode == "official_only"
+    assert settings.wire_tasks == ("replyer",)
 
 
 def test_candidate_paths_dedup_and_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -71,7 +71,7 @@ def test_concurrent_solve_is_serialized(monkeypatch):
     """并发求解必须串行进入 wasm：deepseek-pow 的求解器不是线程安全的。
 
     实测（P2 演练）2 路并发时约一半请求 trap（out of bounds memory access），
-    直接表现成 pow_failed → 降级。这里用假求解器断言"同一时刻只有一个在跑"。
+    直接表现成 pow_failed → 交回 Host。这里用假求解器断言"同一时刻只有一个在跑"。
     """
 
     import deepseek_pow

@@ -1,13 +1,16 @@
 [plugin]
 enabled = true
-config_version = "0.1.0"
+config_version = "0.2.0"
 
 [provision]
 # 插件加载时自动把 Provider 与三个预设模型写进 Host 的 config/model_config.toml，
-# 并接线到 replyer/planner/utils。Host 会热重载该文件，无需重启；写入前自动备份。
+# 并把 deepether 模型接到任务 model_list 首位。Host 会热重载该文件，无需重启；写入前自动备份。
+# 服务商同时写入 max_retry = 1：模型失败一次就轮到下一个模型，不在同一模型上重试。
 enabled = true
 provider_name = "deepether"
 model_config_path = ""
+# 可选纯文本任务：replyer/utils/memory/mid_memory/fast_model/learner（可选项复用 deepether-utils 模型）。
+# planner 需要工具调用、emoji 需要视觉，写进去会被忽略并告警。
 wire_tasks = "replyer,utils"
 selection_strategy = "sequential"
 keep_backup = true
@@ -22,6 +25,9 @@ allowed_origin = "https://chat.deepseek.com"
 health_check_interval_min = 30
 
 [behavior]
+# web_first：正常接管网页版（自动注册把 deepether 模型接到任务 model_list 首位）。
+# official_only：不接管网页版，自动注册把 deepether 模型移出任务 model_list。
+# web_only：已废弃，等同 web_first。
 mode = "web_first"
 thinking_enabled = true
 search_enabled = false
@@ -36,13 +42,6 @@ max_concurrency = 2
 queue_wait_sec = 8
 circuit_fail_threshold = 3
 circuit_cooldown_sec = 60
-
-[fallback]
-fallback_enabled = true
-fallback_model_name = "deepseek-v4-flash"
-fallback_timeout_ms = 120000
-fallback_with_tools = true
-fallback_for_models = []
 
 [antiban]
 enabled = true

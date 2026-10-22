@@ -21,7 +21,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件；禁用后本 Provider 不再注册到 Host")
-    config_version: str = Field(default="0.1.0", description="配置版本号，用于识别配置结构升级")
+    config_version: str = Field(default="0.2.0", description="配置版本号，用于识别配置结构升级")
 
 
 class ProvisionConfig(PluginConfigBase):
@@ -34,8 +34,9 @@ class ProvisionConfig(PluginConfigBase):
     enabled: bool = Field(
         default=True,
         description=(
-            "插件加载时自动把 Provider 与三个预设模型写进 Host 的 config/model_config.toml，并接线到 replyer/planner/utils。"
-            "Host 会热重载该文件、无需重启；写入前自动备份，内容无变化时不落盘"
+            "插件加载时自动把 Provider 与三个预设模型写进 Host 的 config/model_config.toml，"
+            "并把 deepether 模型接到任务 model_list 的首位。Host 会热重载该文件、无需重启；"
+            "写入前自动备份，内容无变化时不落盘"
         ),
     )
     provider_name: str = Field(
@@ -52,9 +53,10 @@ class ProvisionConfig(PluginConfigBase):
     wire_tasks: str = Field(
         default="replyer,utils",
         description=(
-            "要接到预设模型上的任务名，逗号分隔；可选 replyer/planner/utils/memory/mid_memory/fast_model/learner/emoji。"
-            "默认只接 replyer 与 utils：planner 强依赖工具调用，网页版不支持函数调用，"
-            "接了也只是每次先失败一次再降级。留空表示只注册模型、不改任务配置"
+            "要接到预设模型上的纯文本任务名，逗号分隔；可选 replyer/utils/memory/mid_memory/fast_model/learner。"
+            "planner 需要工具调用（function calling）、emoji 需要视觉，网页版做不到，写进去会被忽略并告警。"
+            "memory/mid_memory/learner 输出要求 JSON、fast_model 在回复等待路径上，开启前请评估。"
+            "留空表示只注册模型、不改任务配置"
         ),
     )
     selection_strategy: Literal["sequential", "balance", "random"] = Field(
@@ -113,7 +115,11 @@ class BehaviorConfig(PluginConfigBase):
 
     mode: Literal["web_first", "web_only", "official_only"] = Field(
         default="web_first",
-        description="通道策略：web_first 网页优先失败降级；web_only 只用网页版；official_only 直接走 Host 模型",
+        description=(
+            "通道策略：web_first 正常接管网页版（自动注册把 deepether 模型接到任务 model_list 首位）；"
+            "official_only 不接管网页版（自动注册把 deepether 模型移出任务 model_list）；"
+            "web_only 已废弃，等同 web_first"
+        ),
     )
     thinking_enabled: bool = Field(default=True, description="是否让网页版开启深度思考模式")
     search_enabled: bool = Field(
@@ -161,7 +167,7 @@ class ConcurrencyConfig(PluginConfigBase):
         default=8,
         ge=0,
         le=120,
-        description="排队等待上限（秒）；预计等不到就立刻降级，不要让 Host 撞 hard_timeout",
+        description="排队等待上限（秒）；预计等不到就立刻返回失败，避免把请求挂到 hard_timeout",
     )
     circuit_fail_threshold: int = Field(default=3, ge=1, le=20, description="连续失败多少次后熔断")
     circuit_cooldown_sec: int = Field(default=60, ge=5, le=3600, description="熔断冷却时间（秒），冷却后放一个探针请求")
@@ -198,7 +204,7 @@ class AntibanConfig(PluginConfigBase):
         le=1.0,
         description="抖动比例；0 表示不加抖动（不建议），0.25 表示最多在区间上再放宽四分之一",
     )
-    max_per_minute: int = Field(default=3, ge=1, le=60, description="每分钟最多调用几次网页版，超过则走官方模型")
+    max_per_minute: int = Field(default=3, ge=1, le=60, description="每分钟最多调用几次网页版，超过则本次调用直接失败")
     max_per_hour: int = Field(default=30, ge=1, le=3600, description="每小时最多调用几次网页版")
     max_per_day: int = Field(
         default=200,
@@ -210,7 +216,7 @@ class AntibanConfig(PluginConfigBase):
         default=900,
         ge=0,
         le=86400,
-        description="命中限流（429 或空正文）后的冷却时间（秒）；冷却期内直接走官方模型",
+        description="命中限流（429 或空正文）后的冷却时间（秒）；冷却期内网页版调用直接失败",
     )
     cooldown_on_ban_sec: int = Field(
         default=21600,
@@ -234,37 +240,6 @@ class AntibanConfig(PluginConfigBase):
     )
 
 
-class FallbackConfig(PluginConfigBase):
-    """降级配置：复用 Host 已配置的官方模型，插件内不保存任何密钥。"""
-
-    __ui_label__ = "降级"
-    __ui_icon__ = "shield"
-    __ui_order__ = 6
-
-    fallback_enabled: bool = Field(default=True, description="网页版不可用时是否自动降级到 Host 模型")
-    fallback_model_name: str = Field(
-        default="",
-        description="降级时直选的 Host 模型名（model_config.toml 里已配置的模型）；留空表示禁用降级",
-    )
-    fallback_timeout_ms: int = Field(
-        default=120000,
-        ge=10000,
-        le=600000,
-        description="降级调用超时（毫秒）；实际取值还会被外层剩余预算裁剪",
-    )
-    fallback_with_tools: bool = Field(
-        default=True,
-        description="降级时是否携带 tool_options；只有 planner 这类工具任务需要",
-    )
-    fallback_for_models: list[str] = Field(
-        default_factory=list,
-        description=(
-            "允许降级的模型名列表（model_config.toml 里的 name，例如 deepether-replyer）；"
-            "留空表示全部允许。Host 不在请求里传任务名，所以只能按模型名区分"
-        ),
-    )
-
-
 class DebugConfig(PluginConfigBase):
     """调试与诊断。"""
 
@@ -285,6 +260,5 @@ class DeepEtherProxyConfig(PluginConfigBase):
     credential: CredentialConfig = Field(default_factory=CredentialConfig)
     behavior: BehaviorConfig = Field(default_factory=BehaviorConfig)
     concurrency: ConcurrencyConfig = Field(default_factory=ConcurrencyConfig)
-    fallback: FallbackConfig = Field(default_factory=FallbackConfig)
     antiban: AntibanConfig = Field(default_factory=AntibanConfig)
     debug: DebugConfig = Field(default_factory=DebugConfig)

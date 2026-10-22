@@ -1,9 +1,9 @@
 {
   "manifest_version": 2,
   "id": "com.ether.deepether-proxy",
-  "version": "0.2.4",
+  "version": "0.3.1",
   "name": "DeepEther Proxy",
-  "description": "把 DeepSeek 网页版接入 MaiBot 的 LLM Provider（网页优先、Host 模型兜底）",
+  "description": "把 DeepSeek 网页版接入 MaiBot 的 LLM Provider",
   "author": {
     "name": "EtherTool",
     "url": "https://github.com/EtherTool/DeepEtherProxy"
@@ -24,8 +24,6 @@
   },
   "plugin_type": "provider",
   "capabilities": [
-    "llm.generate",
-    "llm.generate_with_tools",
     "send.text"
   ],
   "dependencies": [
@@ -55,7 +53,7 @@
       "client_type": "com.ether.deepether",
       "name": "DeepEther Proxy",
       "description": "DeepSeek 网页版反代 Provider",
-      "version": "0.2.4"
+      "version": "0.3.1"
     }
   ],
   "i18n": {

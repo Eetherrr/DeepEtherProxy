@@ -42,6 +42,19 @@ def test_manifest_is_strict_valid():
     assert validator.validate(raw), validator.errors
 
 
+def test_manifest_only_declares_text_capability_and_current_version():
+    """插件不回调 Host 官方模型，所以不能声明 llm.generate 能力。"""
+
+    raw = json.loads((PLUGIN_ROOT / "_manifest.json").read_text(encoding="utf-8"))
+    module = _load_plugin_module()
+
+    capabilities = raw["capabilities"]
+    assert capabilities == ["send.text"]
+    assert "llm.generate" not in capabilities
+    assert raw["version"] == module.PROVIDER_VERSION == "0.3.1"
+    assert raw["llm_providers"][0]["version"] == module.PROVIDER_VERSION
+
+
 def test_decorator_matches_manifest():
     """@LLMProvider 与 manifest 的 client_type 必须完全一致（否则插件不加载）。"""
 
@@ -73,9 +86,9 @@ def test_config_model_generates_defaults():
     module = _load_plugin_module()
     plugin_class = module.DeepEtherProxyPlugin
     defaults = plugin_class.build_default_config()
-    assert defaults["plugin"]["config_version"]
+    assert defaults["plugin"]["config_version"] == "0.2.0"
     assert defaults["plugin"]["enabled"] is True
     assert defaults["behavior"]["mode"] == "web_first"
     assert defaults["concurrency"]["max_concurrency"] <= 3
-    assert defaults["fallback"]["fallback_for_models"] == []
+    assert "fallback" not in defaults  # FallbackConfig 已随 0.3.0 删除
     assert defaults["behavior"]["prompt_style"] in ("plain", "replyer", "raw")

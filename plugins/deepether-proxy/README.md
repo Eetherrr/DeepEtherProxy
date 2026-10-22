@@ -3,27 +3,44 @@
 把 **DeepSeek 网页版**接入 MaiBot 的 LLM Provider 插件。
 
 - 接入方式：```LLMProvider("com.ether.deepether")```，**不修改 MaiBot 主程序**
-- 通道策略：网页版优先；不可用时自动降级到 **Host 已配置的官方模型**（插件内不保存任何 API key）
+- 通道策略：网页版优先（部署时让 MaiBot 能把它排在任务 `model_list` 前面，见「部署前提」）；
+  插件内**不保存任何 API key**
 - 一期范围（文档 §4.5）：**只接 `replyer`（主）+ `utils`** —— 这两类任务不需要工具调用、不带图，
   正好避开网页版的全部短板；`planner` 强依赖 `tool_calls`，一期不接
 
-## 安装（0.2.4：不需要再手改 model_config.toml）
+## 安装（0.3.1：不需要再手改 model_config.toml）
 
 1. 把本目录放到 MaiBot 的 `plugins/deepether-proxy`，或在 WebUI 插件页直接上传 zip 安装。
 2. 启动 MaiBot（或在插件页重载插件）。日志会依次出现：
-   `DeepEther Proxy 已加载` → `自动注册 model_config 完成`。
+   `DeepEther Proxy 已加载：…` → `自动注册 model_config 完成`。
 3. **插件会自动完成三件事**，Host 会对 `config/model_config.toml` 热重载，**不用重启**：
-   - 新增服务商 `deepether`（`client_type = com.ether.deepether`、`auth_type = none`、`timeout = 300`）
-   - 新增三个模型：`deepether-replyer`（口语化风格、不思考）、`deepether-planner`（开思考）、
-     `deepether-utils`（不思考）
+   - 新增服务商 `deepether`（`client_type = com.ether.deepether`、`auth_type = none`、`timeout = 300`、
+     `max_retry = 1`）
+   - 新增两个模型：`deepether-replyer`（口语化风格、不思考）、`deepether-utils`（不思考）。
+     `planner` 需要工具调用（function calling），网页版做不到，因此**不注册、也不接线**；`planner` 继续用官方模型
    - 把 `deepether-replyer` / `deepether-utils` 插到 `replyer` / `utils` 的 `model_list` 首位，
      并把 `selection_strategy` 固定为 `sequential`（只有按顺序优先才会先走网页版）
-4. 在 WebUI 的「模型设置」里应能看到上面三个模型；发 `/deepether-setup` 可随时手动重跑，
+4. 在 WebUI 的「模型设置」里应能看到上面两个模型；发 `/deepether-setup` 可随时手动重跑，
    `/deepether-status` 的「自动注册」段落会显示最近一次结果。
 
 > **写入是安全的**：先备份原文件（`model_config.toml.deepether.bak-时间戳`，最多留 5 份）、
 > 用 tomllib 复核、再原子替换；内容已是最新时完全不落盘（避免反复触发热重载）。
 > 解析失败、模型名被其他服务商占用、找不到实例根等情况都只告警，不会改坏配置。
+> 升级到 0.3.1 时，旧版遗留的 `deepether-planner` 模型定义与任务接线会被自动清理。
+
+### 部署前提（让 MaiBot 能正常调度）
+
+插件只是一个普通 LLM Provider，请求失败与其它模型失败的处理方式一致。要让它被正常调度，只需要 3 件事：
+
+- 任务 `model_list` 里，`deepether-*` 之后要有其它模型——否则这个模型失败时，该任务没有可用模型；
+- 任务 `selection_strategy = sequential`——否则按 `balance` / `random` 可能挑不到它，"网页版优先"不成立；
+- 服务商 `api_providers` 的 `max_retry = 1`——否则同一个网页版模型会被重试 3 次（自动注册会写这一项）。
+
+另外：`planner` **不要接**（网页版没有工具调用能力，插件也不注册 `deepether-planner`）；`emoji` 同理
+（需要视觉），留空即可。
+
+以上三项自动注册都会处理，手工配置时照抄下面的样例即可。
+0.2.x → 0.3.x 迁移：插件配置版本升到 0.2.0，Host 会自动重建插件配置，旧的 `[fallback]` 节自动消失。
 
 ### 自动注册的可调项（插件配置 `[provision]`）
 
@@ -32,9 +49,20 @@
 | `enabled` | `true` | 插件加载时是否自动注册 |
 | `provider_name` | `deepether` | 写入的服务商名称 |
 | `model_config_path` | 空 | 留空自动探测；探测不到时填 `config/model_config.toml` 的绝对路径 |
-| `wire_tasks` | `replyer,utils` | 要接线的任务；**默认不接 planner**（它强依赖工具调用，接了只会每次先失败一次再降级） |
+| `wire_tasks` | `replyer,utils` | 可选 `replyer` / `utils` / `memory` / `mid_memory` / `fast_model` / `learner`。`planner` 需要工具调用、`emoji` 需要视觉，网页版做不到，写进去会被忽略并告警；`memory`/`mid_memory`/`learner` 输出要求 JSON、`fast_model` 在回复等待路径上，开启前请评估（详见 [docs/TASK-SUITABILITY.md](../../docs/TASK-SUITABILITY.md)） |
 | `selection_strategy` | `sequential` | 接线时写入的策略，必须 sequential |
 | `keep_backup` | `true` | 写前备份 |
+
+接线方式由插件配置 `behavior.mode` 决定：
+
+| `behavior.mode` | 自动注册做什么 |
+|---|---|
+| `web_first`（默认） | 接线到任务 `model_list` 首位（网页版优先） |
+| `official_only` | 不接管网页版（自动注册把 `deepether-*` 模型移出任务 `model_list`） |
+| `web_only` | 已废弃，行为等同 `web_first` |
+
+> `official_only` 是可逆的：改回 `web_first` 后自动注册会重新把 `deepether-*` 插回首位。
+> 自动注册结果里若提示「该任务 `model_list` 只有 `deepether` 模型」，按提示补一个官方模型即可。
 
 ### 手动配置（不想自动改文件时）
 
@@ -48,6 +76,7 @@ api_key = ""
 client_type = "com.ether.deepether"
 auth_type = "none"
 timeout = 300                               # 关键：深度思考经常超过默认 120s
+max_retry = 1                               # 让 MaiBot 的模型调度与其它模型一致（详见「部署前提」）
 
 # 给每个用途建一个模型条目，用 extra_params 区分提示词风格：
 # - deepether_style    = "replyer" | "plain" | "raw"
@@ -66,17 +95,6 @@ extra_params = { deepether_style = "replyer", deepether_thinking = false }
 [[models]]
 model_type = "llm"
 model_identifier = "deepseek-web"
-name = "deepether-planner"        # 默认不接线；planner 强依赖工具调用，只在你想试时手动挂
-api_provider = "deepether"
-price_in = 0.0
-price_out = 0.0
-send_temperature = false
-force_stream_mode = false
-extra_params = { deepether_style = "plain", deepether_thinking = true }
-
-[[models]]
-model_type = "llm"
-model_identifier = "deepseek-web"
 name = "deepether-utils"
 api_provider = "deepether"
 price_in = 0.0
@@ -86,7 +104,13 @@ force_stream_mode = false
 extra_params = { deepether_style = "plain", deepether_thinking = false }
 ```
 
-4. 最后把任务指向它们（与自动注册的默认行为一致）—— **主备都写上**，网页版失败时 Host 会自动切到下一个（文档 §4.5.2）：
+> 只建 `deepether-replyer` / `deepether-utils` 两个模型：`planner` 需要工具调用（function calling），
+> 网页版做不到，不要为它建模型条目。
+
+> `max_retry` 是 Host 的 `APIProvider` 字段（不是插件配置项），默认值为 3；写成 1 让这个模型像其它模型一样，
+> 失败一次就被 MaiBot 的模型调度接手。
+
+4. 最后把任务指向它们（与自动注册的默认行为一致）—— **主备都写上**，网页版优先：
 
 ```toml
 [model_task_config.replyer]
@@ -99,13 +123,11 @@ model_list = ["deepether-utils", "deepseek-v4-flash"]
 selection_strategy = "sequential"
 ```
 
-> ⚠️ **必须把 `selection_strategy` 设成 `sequential`。** MaiBot 默认是 `random`，
-> 那样每次调用会随机挑一个模型，约一半请求会**静默**走官方 API——既不省钱，
-> 日志里也看不到任何降级痕迹（正是报告 §6.6.2 说的"以为在省钱其实在烧钱"）。
-> `sequential` 才会"优先网页版、失败再按顺序切下一个"。
+> ⚠️ **必须把 `selection_strategy` 设成 `sequential`。** MaiBot 1.3.11 的默认值是 `balance`
+> （0.2.x 的文档写成 `random`），两者都不保证"先网页版"——可能挑不到这个模型，
+> 日志里也看不出网页版有没有被调用过。
 
-> 插件把"没有正文"（包括只有思考内容）判成失败：返回 `success:false` → Host 抛异常 → 切下一个模型。
-> 所以网页版没吐正文时不会变成一条空回复，而是静默切到官方模型并打一条中文 warning。
+> 插件把"没有正文"（包括只有思考内容）判成失败，不会返回一条空回复。
 
 ## 授权（填网页版 token）
 
@@ -139,38 +161,51 @@ token 过期时（上游返回 `40003 INVALID_TOKEN`），状态命令会显示�
 |---|---|---|
 | `antiban.enabled` | `true` | 总开关。关闭后仅建议用于排障 |
 | `antiban.min_interval_sec` / `max_interval_sec` | `8` / `20` | 两次上游请求之间随机抖动等待；同 token 串行（永不在途 2 个） |
-| `antiban.max_per_minute` / `max_per_hour` / `max_per_day` | `3` / `30` / `200` | 三级配额，超限直接降级到官方模型（对话不断线） |
+| `antiban.max_per_minute` / `max_per_hour` / `max_per_day` | `3` / `30` / `200` | 三级配额，超限时本次调用直接失败，由 MaiBot 的模型调度处理 |
 | `antiban.cooldown_on_rate_limit_sec` / `cooldown_on_ban_sec` | `900` / `21600` | 429 / 疑似封号后的静默时长 |
 | `antiban.session_reuse_calls` | `8` | 同一上游会话复用几次再换新（每轮新建会话本身是机器特征） |
 | `antiban.persist_state` | `true` | 把节奏状态写到 `data/antiban_state.json`：重启不重置配额、也不重算冷却 |
 
-- 被限流/封号时不需要你手动做什么：插件会静默降级并在 `/deepether-status` 的「反封禁节奏」段落里显示原因与剩余时间。
-- 已封号 3 天这种场景：先把 `behavior.mode` 设成 `official_only` 让机制性重试停下来，解封后把 `max_per_day` 从 50 起爬坡。
+- 被限流/封号时不需要你手动做什么：插件在 `/deepether-status` 的「反封禁节奏」段落里显示原因与剩余时间，
+  本次调用失败，与其它模型失败一样由 MaiBot 的模型调度处理。
+- 已封号 3 天这种场景：把 `behavior.mode` 设成 `official_only`，自动注册会把 `deepether-*` 从任务
+  `model_list` 里移除，让机制性重试完全停下来；解封后改回 `web_first`，并把 `max_per_day` 从 50 起爬坡。
 - 完整设计与"为什么不做的那些手段"（代理池、随机 UA、伪造 cookie…）见 [docs/ANTIBAN.md](../../docs/ANTIBAN.md)。
 
 ## 配置要点
 
 | 配置项 | 说明 |
 |---|---|
-| `behavior.mode` | `web_first`（默认）/ `web_only` / `official_only` |
+| `behavior.mode` | `web_first`（默认）/ `official_only`；`web_only` 已废弃（仍可加载，等同 `web_first` 并打 warning） |
 | `behavior.prompt_style` | `plain`（默认）/ `replyer`（强约束口语化纯文本）/ `raw`；可被模型 `extra_params.deepether_style` 覆盖 |
 | `behavior.thinking_enabled` | 深度思考开关；可被模型 `extra_params.deepether_thinking` 覆盖 |
 | `concurrency.max_concurrency` | 网页版账号级并发约 3，默认 2，**不建议改成 3 以上** |
-| `fallback.fallback_model_name` | 降级目标：`model_config.toml` 里已配置的模型名；留空则禁用插件内降级 |
-| `fallback.fallback_for_models` | 允许降级的**模型名**列表；留空=全部允许。Host 请求里不带任务名，只能按模型名区分 |
 | `antiban.*` | 反封禁节奏（见上一节）；WebUI 有独立「反封禁」页签 |
 | `debug.dump_request` | 把 Host 原始请求落盘，用于固化契约测试样本 |
 | `debug.dump_response` | 把上游原始 SSE 落盘，用于排查协议漂移 |
+
+> **0.3.0 移除了 `[fallback]` 配置节**（`fallback_enabled` / `fallback_model_name` /
+> `fallback_timeout_ms` / `fallback_with_tools` / `fallback_for_models` 全部作废）：
+> 插件只是一个普通 Provider，旧配置升级时这些字段会被自动移除，WebUI 里旧字段消失属预期。
 
 ## 相关文档
 
 | 文档 | 内容 |
 |---|---|
-| [docs/FEASIBILITY.md](../../docs/FEASIBILITY.md) | 可行性分析：为什么只接 replyer/utils、工具调用缺口、架构取舍 |
+| [docs/FEASIBILITY.md](../../docs/FEASIBILITY.md) | 可行性分析：为什么只接 replyer/utils、工具调用缺口、架构取舍（§6.7 已过时） |
+| [docs/TASK-SUITABILITY.md](../../docs/TASK-SUITABILITY.md) | 各模型任务适配性：哪些能接、哪些永远别接（0.3.1 源码核查） |
+| [docs/SESSION-REUSE.md](../../docs/SESSION-REUSE.md) | 网页版会话上下文复用的可行性分析（0.4 候选：同会话续聊，减少新建聊天） |
 | [docs/ANTIBAN.md](../../docs/ANTIBAN.md) | 反封禁设计：分层模型、措施矩阵、默认值依据、实现落点 |
-| [docs/P2-ACCEPTANCE.md](../../docs/P2-ACCEPTANCE.md) | P2 稳定性验收演练报告 |
+| [docs/P2-ACCEPTANCE.md](../../docs/P2-ACCEPTANCE.md) | P2 稳定性验收演练报告（0.2.x 行为，历史记录） |
 | [docs/upstream-protocol.md](docs/upstream-protocol.md) | 网页版协议实测记录（PoW / SSE 混合帧 / session 路径） |
 | [CHANGELOG.md](CHANGELOG.md) | 版本更新记录 |
+
+## 模型没被优先调度？4 项检查
+
+1. 任务 `model_list` 里，`deepether-*` 之后有没有其它模型；
+2. 该任务 `selection_strategy` 是否为 `sequential`；
+3. 服务商 `max_retry` 是否为 `1`（在 `[[api_providers]]` 里，不是插件配置）；
+4. Host 日志里有没有这个模型的调用记录（插件日志只记录自己这条通道的成功与失败）。
 
 ## 上游改版排查 5 步
 
