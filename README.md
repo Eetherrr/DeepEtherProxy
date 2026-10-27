@@ -144,12 +144,33 @@ scripts/probe_commandcode.py     真机探针（文本 / 工具 / 视觉 / Provi
 git clone https://github.com/Eetherrr/DeepEtherProxy.git
 cd DeepEtherProxy/plugins/deepether-proxy
 pip install maibot-plugin-sdk pytest httpx wasmtime deepseek-pow tomlkit
-python -m pytest -q          # 当前：272 passed, 4 skipped
+python -m pytest -q          # 当前：269 passed, 4 skipped（以 CI 结果为准）
 python ../../scripts/gen_commandcode_catalog.py --check   # 模型目录是否与 models.md 一致
 python ../../scripts/build_package.py   # 生成 dist/deepether-proxy-<version>.zip
 ```
 
 把 `plugins/deepether-proxy` 放进 MaiBot 的 `plugins/` 目录（开发期可用目录联接）即可联调。
+
+## CI 与发版
+
+| 工作流 | 触发 | 做什么 |
+|---|---|---|
+| [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | push / PR 到 `main`，或手动 | 校验 manifest 与 `config.toml` 可解析 → `pytest` → 打包（含 CommandCode 模型目录一致性校验）→ 上传 zip 产物 |
+| [`.github/workflows/release.yml`](.github/workflows/release.yml) | 推送 `v*` tag，或手动指定 tag | 先跑测试做闸门 → 打包 → 校验 tag 与 manifest 版本一致并生成 Release 正文 → 发布/更新 Release 并上传 zip |
+
+发版步骤：
+
+```bash
+# 1. 改版本号：_manifest.json / PROVIDER_VERSION / CHANGELOG.md
+# 2. 提交并推送
+git commit -am "feat: 0.6.0 — ..."
+git push
+# 3. 打 tag 触发 Release 工作流
+git tag v0.6.0
+git push origin v0.6.0
+```
+
+> tag 与 `_manifest.json` 版本不一致时工作流会直接失败，避免发出"号不对"的包。
 
 ## 版本基线
 

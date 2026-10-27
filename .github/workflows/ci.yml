@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: 测试 + 打包校验
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 准备 Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: plugins/deepether-proxy/tests/requirements-ci.txt
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r plugins/deepether-proxy/tests/requirements-ci.txt
+
+      - name: 校验 manifest 与配置模板
+        run: |
+          python -m json.tool plugins/deepether-proxy/_manifest.json > /dev/null
+          python -c "import tomllib;tomllib.load(open('plugins/deepether-proxy/config.toml','rb'))"
+
+      - name: 单元测试
+        working-directory: plugins/deepether-proxy
+        run: python -m pytest -q
+
+      - name: 打包（含 CommandCode 模型目录一致性校验）
+        run: python scripts/build_package.py
+
+      - name: 上传 zip 作为构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepether-proxy-zip
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 14

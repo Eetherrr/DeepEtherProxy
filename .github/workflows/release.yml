@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布的 tag（例如 v0.5.0，需已存在）"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: 构建并发布 Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 准备 Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: plugins/deepether-proxy/tests/requirements-ci.txt
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r plugins/deepether-proxy/tests/requirements-ci.txt
+
+      - name: 单元测试（发版前闸门）
+        working-directory: plugins/deepether-proxy
+        run: python -m pytest -q
+
+      - name: 构建插件 zip
+        run: python scripts/build_package.py
+
+      - name: 校验 tag 与 manifest 一致，并生成 Release 正文
+        env:
+          TAG_NAME: ${{ github.event.inputs.tag || github.ref_name }}
+        run: python scripts/prepare_release.py --tag "$TAG_NAME" --body-out .release-body.md
+
+      - name: 发布 / 更新 Release 并上传附件
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: ${{ github.event.inputs.tag || github.ref_name }}
+          body_path: .release-body.md
+          files: dist/*.zip
+          fail_on_unmatched_files: true
+          generate_release_notes: false
+          draft: false
+          prerelease: false
