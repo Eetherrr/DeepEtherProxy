@@ -1,0 +1,17 @@
+{"type": "start"}
+{"type": "start-step", "request": {}, "warnings": []}
+{"type": "tool-input-start", "id": "call_00_n1mqlck28jzdk7lusrf6r0u2", "toolName": "reply", "dynamic": false}
+{"type": "tool-input-delta", "id": "call_00_n1mqlck28jzdk7lusrf6r0u2", "delta": "{"}
+{"type": "tool-input-delta", "id": "call_00_n1mqlck28jzdk7lusrf6r0u2", "delta": "\""}
+{"type": "tool-input-delta", "id": "call_00_n1mqlck28jzdk7lusrf6r0u2", "delta": "text"}
+{"type": "tool-input-delta", "id": "call_00_n1mqlck28jzdk7lusrf6r0u2", "delta": "\""}
+{"type": "tool-input-delta", "id": "call_00_n1mqlck28jzdk7lusrf6r0u2", "delta": ": "}
+{"type": "tool-input-delta", "id": "call_00_n1mqlck28jzdk7lusrf6r0u2", "delta": "\""}
+{"type": "tool-input-delta", "id": "call_00_n1mqlck28jzdk7lusrf6r0u2", "delta": "OK"}
+{"type": "tool-input-delta", "id": "call_00_n1mqlck28jzdk7lusrf6r0u2", "delta": "\""}
+{"type": "tool-input-delta", "id": "call_00_n1mqlck28jzdk7lusrf6r0u2", "delta": "}"}
+{"type": "tool-input-end", "id": "call_00_n1mqlck28jzdk7lusrf6r0u2"}
+{"type": "tool-call", "toolCallId": "call_00_n1mqlck28jzdk7lusrf6r0u2", "toolName": "reply", "input": {"text": "OK"}}
+{"type": "finish-step", "finishReason": "tool-calls", "rawFinishReason": "tool_calls", "usage": {"inputTokens": 281, "inputTokenDetails": {"noCacheTokens": 25, "cacheReadTokens": 256}, "outputTokens": 36, "outputTokenDetails": {"textTokens": 36, "reasoningTokens": 0}, "totalTokens": 317, "raw": {"prompt_tokens": 281, "completion_tokens": 36, "total_tokens": 317, "prompt_tokens_details": {"cached_tokens": 256}, "completion_tokens_details": {"reasoning_tokens": 0, "accepted_prediction_tokens": 0, "rejected_prediction_tokens": 0}}, "reasoningTokens": 0, "cachedInputTokens": 256}, "providerMetadata": {"novita": {"acceptedPredictionTokens": 0, "rejectedPredictionTokens": 0}}, "response": {"id": "802eaafc589b03e038324220a4ebec93", "timestamp": "2026-10-25T10:27:45.000Z", "modelId": "deepseek/deepseek-v4.1-flash", "headers": {"access-control-allow-origin": "*", "cache-control": "no-cache", "cf-cache-status": "DYNAMIC", "cf-ray": "a50087cb1a12e4bc-AMS", "connection": "close", "content-type": "text/event-stream", "date": "Sun, 25 Oct 2026 10:27:45 GMT", "server": "cloudflare", "set-cookie": "__cf_bm=jeEG_MLCSmKnCSUnjTd5VuXnJCc6VGOSh3oRe1jeTVI-1792924064.4969823-1.0.1.1-tEShwDGmBucYXOybv6c1.Sv.RJO4CqNG4a2HSmYoLFPO44j.fXoYWe4AXkC4Opa3NlVvWeDtP.W_F3KB209cYnFC_AIi6qwXAxCxsBXtdllxxOAE5AhfN4wGSc8bUU_B; HttpOnly; SameSite=None; Secure; Path=/; Domain=novita.ai; Expires=Sun, 25 Oct 2026 10:57:45 GMT", "transfer-encoding": "chunked", "x-fusion-transport": "embedded", "x-ratelimit-limit-requests": "20000", "x-ratelimit-limit-tokens": "2000000000", "x-ratelimit-remaining-requests": "19536", "x-ratelimit-remaining-tokens": "1967648893", "x-ratelimit-reset-requests": "1s", "x-ratelimit-reset-tokens": "971ms", "x-request-id": "", "x-trace-id": "802eaafc589b03e038324220a4ebec93"}}}
+{"type": "finish", "finishReason": "tool-calls", "rawFinishReason": "tool_calls", "totalUsage": {"inputTokens": 281, "inputTokenDetails": {"noCacheTokens": 25, "cacheReadTokens": 256}, "outputTokens": 36, "outputTokenDetails": {"textTokens": 36, "reasoningTokens": 0}, "totalTokens": 317, "reasoningTokens": 0, "cachedInputTokens": 256}}
+{"type": "provider-metadata", "providerMetadata": {"novita": {"acceptedPredictionTokens": 0, "rejectedPredictionTokens": 0}}}

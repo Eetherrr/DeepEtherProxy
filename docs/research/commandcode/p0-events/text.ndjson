@@ -1,0 +1,21 @@
+{"type": "start"}
+{"type": "start-step", "request": {}, "warnings": []}
+{"type": "reasoning-start", "id": "reasoning-0"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": "The"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " user wants me to reply"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " with exactly \""}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": "OK\" and nothing else."}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " This is a simple"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " instruction-f"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": "ollowing request"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": ". I should output just"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " \""}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": "OK"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": "\"."}
+{"type": "reasoning-end", "id": "reasoning-0"}
+{"type": "text-start", "id": "txt-0"}
+{"type": "text-delta", "id": "txt-0", "text": "OK"}
+{"type": "text-end", "id": "txt-0"}
+{"type": "finish-step", "finishReason": "stop", "rawFinishReason": "stop", "usage": {"inputTokens": 46, "inputTokenDetails": {"noCacheTokens": 46, "cacheReadTokens": 0}, "outputTokens": 34, "outputTokenDetails": {"textTokens": 2, "reasoningTokens": 32}, "totalTokens": 80, "raw": {"prompt_tokens": 46, "completion_tokens": 34, "total_tokens": 80, "prompt_tokens_details": {"cached_tokens": 0}, "completion_tokens_details": {"reasoning_tokens": 32, "accepted_prediction_tokens": 0, "rejected_prediction_tokens": 0}}, "reasoningTokens": 32, "cachedInputTokens": 0}, "providerMetadata": {"novita": {"acceptedPredictionTokens": 0, "rejectedPredictionTokens": 0}}, "response": {"id": "af69125edb4bb0564aa54274dae33c7f", "timestamp": "2026-10-25T10:22:14.000Z", "modelId": "deepseek/deepseek-v4.1-flash", "headers": {"access-control-allow-origin": "*", "cache-control": "no-cache", "cf-cache-status": "DYNAMIC", "cf-ray": "a5007fb8ceabfac0-AMS", "connection": "close", "content-type": "text/event-stream", "date": "Sun, 25 Oct 2026 10:22:14 GMT", "server": "cloudflare", "set-cookie": "__cf_bm=zxsiCDE6s7HpaRchFrhOvgZshMXBL30B.3hN5NqNVds-1792923733.8862631-1.0.1.1-6Bj5mFAUTMAFouJkmHTYLy0C.1w6inrvVbhS6I7zeVSuDVsXtvtsCvXNX_HDOl2OTZc1kJpt8ql82X.KeE0oNl6LSpHOS960z8XegEi2ajUf7jSRZ3ObDGVkOS3caUGL; HttpOnly; SameSite=None; Secure; Path=/; Domain=novita.ai; Expires=Sun, 25 Oct 2026 10:52:14 GMT", "transfer-encoding": "chunked", "via": "1.1 Caddy", "x-fusion-transport": "embedded", "x-ratelimit-limit-requests": "20000", "x-ratelimit-limit-tokens": "2000000000", "x-ratelimit-remaining-requests": "19848", "x-ratelimit-remaining-tokens": "1939711518", "x-ratelimit-reset-requests": "456ms", "x-ratelimit-reset-tokens": "2s", "x-request-id": "", "x-trace-id": "af69125edb4bb0564aa54274dae33c7f"}}}
+{"type": "finish", "finishReason": "stop", "rawFinishReason": "stop", "totalUsage": {"inputTokens": 46, "inputTokenDetails": {"noCacheTokens": 46, "cacheReadTokens": 0}, "outputTokens": 34, "outputTokenDetails": {"textTokens": 2, "reasoningTokens": 32}, "totalTokens": 80, "reasoningTokens": 32, "cachedInputTokens": 0}}
+{"type": "provider-metadata", "providerMetadata": {"novita": {"acceptedPredictionTokens": 0, "rejectedPredictionTokens": 0}}}

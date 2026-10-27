@@ -1,4 +1,4 @@
-"""状态文本渲染。"""
+"""状态文本渲染：只保留简洁的几行。"""
 
 from pathlib import Path
 
@@ -10,30 +10,39 @@ from deepether.state import RuntimeState
 from deepether.status import render_status
 
 
-def _render(tmp_path: Path, *, token: str | None = "tok-123456", loopback: bool = True) -> str:
-    config = DeepEtherProxyConfig()
+def _store(tmp_path: Path, token: str | None = "tok-123456") -> CredentialStore:
     store = CredentialStore(tmp_path, logging.getLogger("test"))
     if token:
         store.save(token, SOURCE_BOOKMARKLET)
-    state = RuntimeState()
+    return store
+
+
+def _render(tmp_path: Path, **overrides) -> str:
+    config = overrides.pop("config", None) or DeepEtherProxyConfig()
+    store = overrides.pop("store", None) or _store(tmp_path, overrides.pop("token", "tok-123456"))
+    state = overrides.pop("state", None) or RuntimeState()
     return render_status(
-        version="0.1.0",
+        version="0.5.0",
         config=config,
         store=store,
         state=state,
-        loopback_running=loopback,
-        loopback_port=18765,
-        nonce="the-nonce",
+        **overrides,
     )
 
 
-def test_status_contains_credential_and_bookmarklet(tmp_path: Path):
-    text = _render(tmp_path)
-    assert "DeepEther Proxy v0.1.0" in text
-    assert "凭证" in text
-    assert "书签小工具" in text
-    assert "javascript:" in text
-    assert "the-nonce" in text
+def test_status_is_short_and_readable(tmp_path: Path):
+    text = _render(tmp_path, loopback_enabled=True, loopback_running=True, loopback_port=18765, nonce="n")
+    lines = text.splitlines()
+
+    assert lines[0].startswith("DeepEther v0.5.0")
+    assert 3 <= len(lines) <= 6
+    assert "凭证：已就绪" in text
+    # 详细参数不再铺在聊天里
+    assert "书签" not in text
+    assert "自适应预算" not in text
+    assert "夜间节律" not in text
+    assert "javascript:" not in text
+    # token 只出现脱敏形式
     assert "tok-123456" not in text
 
 
@@ -43,84 +52,46 @@ def test_status_reports_missing_credential(tmp_path: Path):
 
 
 def test_status_reports_invalid_reason(tmp_path: Path):
-    config = DeepEtherProxyConfig()
-    store = CredentialStore(tmp_path, logging.getLogger("test"))
-    store.save("tok-1", SOURCE_BOOKMARKLET)
+    store = _store(tmp_path, "tok-1")
     store.mark_invalid("上游返回 401")
-    text = render_status(
-        version="0.1.0",
-        config=config,
-        store=store,
-        state=RuntimeState(),
-        loopback_running=True,
-        loopback_port=18765,
-        nonce="n",
-    )
+    text = _render(tmp_path, store=store)
     assert "已失效" in text
     assert "401" in text
 
 
-def test_status_shows_manual_token_steps_when_loopback_disabled(tmp_path: Path):
-    """发布版默认关闭回环，状态里必须给出"从控制台取 token 填 WebUI 配置"的步骤。"""
-
-    config = DeepEtherProxyConfig()
-    store = CredentialStore(tmp_path, logging.getLogger("test"))
-    text = render_status(
-        version="0.2.0",
-        config=config,
-        store=store,
-        state=RuntimeState(),
-        loopback_running=False,
-        loopback_port=18765,
-        nonce="n",
-        loopback_enabled=False,
-    )
-    assert "已关闭（发布版默认）" in text
-    assert "localStorage.getItem('userToken')" in text
-    assert "WebUI" in text
-    assert "javascript:" not in text
+def test_status_shows_usage_and_circuit(tmp_path: Path):
+    pacing = {
+        "in_cooldown": True,
+        "cooldown_remaining_sec": 120.0,
+        "used_last_hour": 18,
+        "used_last_day": 120,
+        "limits": {"per_day": 400, "per_hour": 45},
+    }
+    text = _render(tmp_path, pacing=pacing, circuit_state="open")
+    assert "今日 120/400" in text
+    assert "1 小时 18/45" in text
+    assert "冷却 120s" in text
+    assert "熔断 open" in text
 
 
-def test_status_shows_counts(tmp_path: Path):
-    config = DeepEtherProxyConfig()
-    store = CredentialStore(tmp_path, logging.getLogger("test"))
-    store.save("tok-1", SOURCE_BOOKMARKLET)
-    state = RuntimeState()
-    state.record_success(1200)
-    state.record_failure("upstream_timeout", "上游超时")
-    text = render_status(
-        version="0.1.0",
-        config=config,
-        store=store,
-        state=state,
-        loopback_running=True,
-        loopback_port=18765,
-        nonce="n",
-    )
-    assert "网页版成功：1 次｜失败：1 次（最近 24 小时 1 次）" in text
-    assert "1200 ms" in text
+def test_status_shows_commandcode_summary(tmp_path: Path):
+    cc = {"five_hour_used": 1.2, "five_hour_limit": 3.0, "circuit_state": "closed"}
+    text = _render(tmp_path, cc=cc)
+    assert "CommandCode：5 小时 $1.20/$3.00" in text
+    assert "熔断 closed" in text
 
 
-def test_status_shows_24h_window_and_gate_rejections(tmp_path: Path):
-    """报告 §6.6.2 / §7.1：状态里要能一眼看到 24 小时失败与闸门拒绝次数。"""
-
-    config = DeepEtherProxyConfig()
-    store = CredentialStore(tmp_path, logging.getLogger("test"))
-    store.save("tok-1", SOURCE_BOOKMARKLET)
+def test_status_shows_last_error(tmp_path: Path):
     state = RuntimeState()
     state.record_failure("upstream_timeout", "上游超时")
-    state.record_failure("concurrency_rejected", "并发已满")
-    text = render_status(
-        version="0.1.0",
-        config=config,
-        store=store,
-        state=state,
-        loopback_running=True,
-        loopback_port=18765,
-        nonce="n",
-        gate_rejected=7,
-    )
-    assert "失败：2 次（最近 24 小时 2 次）" in text
-    assert "闸门拒绝：7 次" in text
-    assert state.failures_last_24h == 2
-    assert "降级" not in text  # 不暴露"降级/回落"概念：插件只是普通模型通道
+    text = _render(tmp_path, state=state)
+    assert "最近错误" in text
+    assert "上游超时" in text
+
+
+def test_status_hides_auth_page_when_loopback_disabled(tmp_path: Path):
+    text = _render(tmp_path, loopback_enabled=False, loopback_running=False)
+    assert "授权页" not in text
+
+    text = _render(tmp_path, loopback_enabled=True, loopback_running=True, loopback_port=18765, nonce="abc")
+    assert "授权页：http://127.0.0.1:18765/" in text

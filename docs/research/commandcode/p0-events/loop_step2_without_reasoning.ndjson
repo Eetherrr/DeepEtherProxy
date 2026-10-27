@@ -1,0 +1,25 @@
+{"type": "start"}
+{"type": "start-step", "request": {}, "warnings": []}
+{"type": "reasoning-start", "id": "reasoning-0"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": "The"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " user wants me to reply with"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " exactly \"DONE\". I"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " must"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " use the reply tool."}
+{"type": "reasoning-end", "id": "reasoning-0"}
+{"type": "tool-input-start", "id": "call_00_odyvqcfpr58za791xd6ffn3a", "toolName": "reply", "dynamic": false}
+{"type": "tool-input-delta", "id": "call_00_odyvqcfpr58za791xd6ffn3a", "delta": "{"}
+{"type": "tool-input-delta", "id": "call_00_odyvqcfpr58za791xd6ffn3a", "delta": "\""}
+{"type": "tool-input-delta", "id": "call_00_odyvqcfpr58za791xd6ffn3a", "delta": "text"}
+{"type": "tool-input-delta", "id": "call_00_odyvqcfpr58za791xd6ffn3a", "delta": "\""}
+{"type": "tool-input-delta", "id": "call_00_odyvqcfpr58za791xd6ffn3a", "delta": ": "}
+{"type": "tool-input-delta", "id": "call_00_odyvqcfpr58za791xd6ffn3a", "delta": "\""}
+{"type": "tool-input-delta", "id": "call_00_odyvqcfpr58za791xd6ffn3a", "delta": "D"}
+{"type": "tool-input-delta", "id": "call_00_odyvqcfpr58za791xd6ffn3a", "delta": "ONE"}
+{"type": "tool-input-delta", "id": "call_00_odyvqcfpr58za791xd6ffn3a", "delta": "\""}
+{"type": "tool-input-delta", "id": "call_00_odyvqcfpr58za791xd6ffn3a", "delta": "}"}
+{"type": "tool-input-end", "id": "call_00_odyvqcfpr58za791xd6ffn3a"}
+{"type": "tool-call", "toolCallId": "call_00_odyvqcfpr58za791xd6ffn3a", "toolName": "reply", "input": {"text": "DONE"}}
+{"type": "finish-step", "finishReason": "tool-calls", "rawFinishReason": "tool_calls", "usage": {"inputTokens": 367, "inputTokenDetails": {"noCacheTokens": 111, "cacheReadTokens": 256}, "outputTokens": 57, "outputTokenDetails": {"textTokens": 38, "reasoningTokens": 19}, "totalTokens": 424, "raw": {"prompt_tokens": 367, "completion_tokens": 57, "total_tokens": 424, "prompt_tokens_details": {"cached_tokens": 256}, "completion_tokens_details": {"reasoning_tokens": 19, "accepted_prediction_tokens": 0, "rejected_prediction_tokens": 0}}, "reasoningTokens": 19, "cachedInputTokens": 256}, "providerMetadata": {"novita": {"acceptedPredictionTokens": 0, "rejectedPredictionTokens": 0}}, "response": {"id": "ec1d8e71b4c71b5a79a64fa7646b6d61", "timestamp": "2026-10-25T10:31:19.000Z", "modelId": "deepseek/deepseek-v4.1-flash", "headers": {"access-control-allow-origin": "*", "cache-control": "no-cache", "cf-cache-status": "DYNAMIC", "cf-ray": "a5008d03deaeb8d2-AMS", "connection": "close", "content-type": "text/event-stream", "date": "Sun, 25 Oct 2026 10:31:19 GMT", "server": "cloudflare", "set-cookie": "__cf_bm=CtDdjKfEOiAQGhS_H02EVakQZWrGXJYOCTbNiFWQkKw-1792924278.3782432-1.0.1.1-D53f8cfVHTziR5QWvaDYNJBNHtvwBXwBH9.ohl9GBshq4J74QL4wcnHNcDqn0Z14S9EbjF94n7yUce2KEhAUtVM8kFzeWvJ.xvsJkqi7KanR6CO.BQjyPztpZTvzOR0u; HttpOnly; SameSite=None; Secure; Path=/; Domain=novita.ai; Expires=Sun, 25 Oct 2026 11:01:19 GMT", "transfer-encoding": "chunked", "x-fusion-transport": "embedded", "x-ratelimit-limit-requests": "20000", "x-ratelimit-limit-tokens": "2000000000", "x-ratelimit-remaining-requests": "19753", "x-ratelimit-remaining-tokens": "1926605070", "x-ratelimit-reset-requests": "741ms", "x-ratelimit-reset-tokens": "2s", "x-request-id": "", "x-trace-id": "ec1d8e71b4c71b5a79a64fa7646b6d61"}}}
+{"type": "finish", "finishReason": "tool-calls", "rawFinishReason": "tool_calls", "totalUsage": {"inputTokens": 367, "inputTokenDetails": {"noCacheTokens": 111, "cacheReadTokens": 256}, "outputTokens": 57, "outputTokenDetails": {"textTokens": 38, "reasoningTokens": 19}, "totalTokens": 424, "reasoningTokens": 19, "cachedInputTokens": 256}}
+{"type": "provider-metadata", "providerMetadata": {"novita": {"acceptedPredictionTokens": 0, "rejectedPredictionTokens": 0}}}

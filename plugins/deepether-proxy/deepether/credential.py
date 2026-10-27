@@ -169,7 +169,7 @@ class CredentialStore:
         if self._record is not None:
             self._persist()
         self._logger.warning(
-            "网页版凭证已失效（%s）：%s。请重新获取 token 并更新到插件配置的 credential.web_token。",
+            "网页版凭证已失效（%s）：%s。请重新获取 token 并更新到插件配置的 credential.web_tokens。",
             self._invalid_reason,
             self._record.masked if self._record else "(空)",
         )

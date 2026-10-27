@@ -34,74 +34,75 @@ DEFAULT_MAX_RETRY: Final[int] = 1
 DEFAULT_MODEL_IDENTIFIER: Final[str] = "deepseek-web"
 MAX_BACKUPS: Final[int] = 5
 BACKUP_SUFFIX: Final[str] = ".deepether.bak"
-TASKS_ALL: Final[tuple[str, ...]] = (
-    "replyer",
-    "utils",
-    "memory",
-    "mid_memory",
-    "fast_model",
-    "learner",
-)
-"""允许接线的任务名：都是纯文本生成任务。
-
-**不含 planner**（强依赖 function calling）与 **emoji**（聊天内选择需要看拼图），
-这两类网页版做不到；也不含 vlm/voice/embedding/image_embedding。
-"""
-
-UNSUPPORTED_WIRE_TASKS: Final[dict[str, str]] = {
-    "planner": (
-        "planner 需要工具调用（function calling），网页版做不到，已忽略该任务；"
-        "planner 请继续使用官方模型"
-    ),
-    "emoji": (
-        "emoji 的聊天内选择需要看表情包拼图（视觉），网页版没有视觉能力，已忽略该任务；"
-        "emoji 留空即可（会按 planner/vlm 的视觉逻辑处理）"
-    ),
-}
-"""明确不支持的任务：出现在 `wire_tasks` 里时跳过并告警，绝不接线。"""
-
-TASK_WIRE_CAVEATS: Final[dict[str, str]] = {
-    "memory": "该任务要求严格 JSON，网页版格式不稳时本次结果会被静默丢弃（不会报错、也不会切模型）",
-    "mid_memory": "该任务要求 JSON，解析失败会丢弃本次摘要（不会报错、也不会切模型）",
-    "learner": "该任务是后台批量的 JSON 输出，解析失败会静默丢弃本次结果",
-    "fast_model": "该任务处在回复的等待路径上（断句/表达选择），网页版 8~20 秒抖动会拖慢回复，建议谨慎开启",
-}
-"""接线这些"可选用"任务时给出的风险提示（不影响接线本身）。"""
 
 LEGACY_PLANNER_MODEL: Final[str] = "deepether-planner"
 """0.3.0 及更早版本会自动注册这个模型；它无法承担 planner 的工具调用，升级时就地清理。"""
 
+CC_CLIENT_TYPE: Final[str] = "com.ether.commandcode"
+CC_BASE_URL: Final[str] = "plugin://com.ether.commandcode"
+CC_PROVIDER_NAME: Final[str] = "commandcode"
+CC_MODEL_PREFIX: Final[str] = "cc-"
+"""CommandCode 通道：与 DeepSeek 通道并存，模型名统一 `cc-` 前缀。"""
+
+
+@dataclass(frozen=True)
+class CcProvisionSettings:
+    """CommandCode 自动注册的可调项。
+
+    只注册模型，不接任何任务：注册 ≠ 接线，具体模型放进哪个任务由用户在 WebUI 里决定。
+    """
+
+    enabled: bool = True
+    provider_name: str = CC_PROVIDER_NAME
+    model_config_path: str = ""
+    register_models: str = "all"
+    model_include: str = ""
+    model_exclude: str = ""
+    model_prefix: str = CC_MODEL_PREFIX
+    keep_backup: bool = True
+
+
+def cc_settings_from_config(config: Any) -> CcProvisionSettings:
+    """从插件配置里读出 CommandCode 自动注册设置。"""
+
+    section = getattr(config, "commandcode", None)
+    provision = getattr(config, "provision", None)
+    if section is None:
+        return CcProvisionSettings(enabled=False)
+    api_key = str(getattr(section, "api_key", "") or "").strip() or os.environ.get(
+        "COMMAND_CODE_API_KEY", ""
+    ).strip()
+    prefix = str(getattr(section, "model_prefix", CC_MODEL_PREFIX) or CC_MODEL_PREFIX).strip()
+    return CcProvisionSettings(
+        enabled=bool(api_key),
+        provider_name=str(getattr(section, "provider_name", "") or "").strip() or CC_PROVIDER_NAME,
+        model_config_path=str(getattr(provision, "model_config_path", "") or "").strip(),
+        register_models=str(getattr(section, "register_models", "all") or "all").strip().lower(),
+        model_include=str(getattr(section, "model_include", "") or "").strip(),
+        model_exclude=str(getattr(section, "model_exclude", "") or "").strip(),
+        model_prefix=prefix or CC_MODEL_PREFIX,
+        keep_backup=bool(getattr(provision, "keep_backup", True)),
+    )
+
 
 @dataclass(frozen=True)
 class ModelPlan:
-    """一个预设模型：名字、提示词风格、是否开思考、默认接线到哪个任务。"""
+    """一个预设模型：名字、提示词风格、是否开思考。"""
 
     name: str
     style: str
     thinking: bool
-    task: str
 
 
 DEFAULT_PLAN: Final[tuple[ModelPlan, ...]] = (
-    ModelPlan(name="deepether-replyer", style="replyer", thinking=False, task="replyer"),
-    ModelPlan(name="deepether-utils", style="plain", thinking=False, task="utils"),
+    ModelPlan(name="deepether-replyer", style="replyer", thinking=False),
+    ModelPlan(name="deepether-utils", style="plain", thinking=False),
 )
-"""默认注册的模型。
+"""默认注册的模型（只注册，不接线）。
 
 刻意**不注册** `deepether-planner`：planner 的命脉是 function calling，而网页版没有
 工具调用能力；注册了只会让用户在 WebUI 里误把它配给 planner，每次先失败一次。
 """
-
-TASK_MODEL_MAP: Final[dict[str, str]] = {
-    "replyer": "deepether-replyer",
-    "utils": "deepether-utils",
-    # 可选的纯文本任务复用 plain/不思考的 utils 模型，不再为每个任务单独建模型条目。
-    "memory": "deepether-utils",
-    "mid_memory": "deepether-utils",
-    "fast_model": "deepether-utils",
-    "learner": "deepether-utils",
-}
-"""任务 → 用于接线的模型名（`DEFAULT_PLAN` 里只定义模型，任务与模型的对应关系在这里）。"""
 
 
 @dataclass(frozen=True)
@@ -110,12 +111,7 @@ class ProvisionSettings:
 
     provider_name: str = "deepether"
     model_config_path: str = ""
-    wire_tasks: tuple[str, ...] = ("replyer", "utils")
     keep_backup: bool = True
-    selection_strategy: str = "sequential"
-    mode: str = "web_first"
-    wire_note: str = ""
-    """`wire_tasks` 里被跳过的任务说明（例如 planner），写进自动注册结果里提醒用户。"""
 
 
 @dataclass
@@ -151,69 +147,16 @@ class ProvisionResult:
         return " ｜ ".join(parts)
 
 
-def _wire_tokens(raw: str | list[str] | tuple[str, ...] | None) -> list[str]:
-    """把配置里的任务名（支持逗号/空格分隔的字符串）拆成 token 列表。"""
-
-    if raw is None:
-        return []
-    if isinstance(raw, (list, tuple)):
-        return [str(item).strip() for item in raw]
-    text = str(raw).replace(",", " ").replace("，", " ").replace(";", " ").replace("；", " ")
-    return [part.strip() for part in text.split()]
-
-
-def _unsupported_wire_note(raw: str | list[str] | tuple[str, ...] | None) -> str:
-    """返回 `wire_tasks` 里被跳过的任务说明（去重后拼接）。"""
-
-    notes: list[str] = []
-    for item in _wire_tokens(raw):
-        note = UNSUPPORTED_WIRE_TASKS.get(item)
-        if note and note not in notes:
-            notes.append(note)
-    return "；".join(notes)
-
-
-def parse_wire_tasks(raw: str | list[str] | tuple[str, ...] | None) -> tuple[str, ...]:
-    """把配置里的任务名解析成元组（`planner` 会被跳过，见 `UNSUPPORTED_WIRE_TASKS`）。"""
-
-    seen: list[str] = []
-    for item in _wire_tokens(raw):
-        if not item or item in seen:
-            continue
-        if item in UNSUPPORTED_WIRE_TASKS:
-            # 不报错：旧配置里带着 planner 也要能正常跑，只是不接线（由 settings 给出提示）。
-            continue
-        if item not in TASKS_ALL:
-            raise ValueError(
-                "不支持的任务名 " + item + "；可选：" + "、".join(TASKS_ALL)
-            )
-        seen.append(item)
-    return tuple(seen)
-
-
 def settings_from_config(config: Any) -> ProvisionSettings:
     """从插件配置对象里读出自动注册设置；配置缺节时返回默认值。"""
 
     section = getattr(config, "provision", None)
-    behavior = getattr(config, "behavior", None)
-    mode = str(getattr(behavior, "mode", "") or "").strip() or "web_first"
     if section is None:
-        return ProvisionSettings(mode=mode)
-    raw_wire = getattr(section, "wire_tasks", "")
-    try:
-        wire = parse_wire_tasks(raw_wire)
-    except ValueError:
-        wire = ProvisionSettings().wire_tasks
-    provider_name = str(getattr(section, "provider_name", "") or "").strip() or "deepether"
-    strategy = str(getattr(section, "selection_strategy", "") or "").strip() or "sequential"
+        return ProvisionSettings()
     return ProvisionSettings(
-        provider_name=provider_name,
+        provider_name=str(getattr(section, "provider_name", "") or "").strip() or "deepether",
         model_config_path=str(getattr(section, "model_config_path", "") or "").strip(),
-        wire_tasks=wire,
         keep_backup=bool(getattr(section, "keep_backup", True)),
-        selection_strategy=strategy,
-        mode=mode,
-        wire_note=_unsupported_wire_note(raw_wire),
     )
 
 
@@ -282,13 +225,61 @@ def detect_model_config(*, settings: ProvisionSettings, plugin_dir: Path | None 
     return None, cands
 
 
+def read_model_providers(path: Path) -> dict[str, str]:
+    """读取 model_config.toml 里所有模型名 → 服务商名；读不到返回空字典。"""
+
+    try:
+        parsed = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    return {
+        str(item.get("name") or ""): str(item.get("api_provider") or "")
+        for item in parsed.get("models", [])
+    }
+
+
+def read_task_models(path: Path, task: str) -> list[tuple[str, str]]:
+    """读取某个任务 `model_list` 里的模型名与服务商。
+
+    Args:
+        path: model_config.toml 路径。
+        task: 任务名，例如 replyer。
+
+    Returns:
+        list[tuple[str, str]]: [(模型名, api_provider 名称), ...]，按 model_list 顺序；读不到返回空列表。
+    """
+
+    try:
+        parsed = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return []
+    providers = {
+        str(item.get("name") or ""): str(item.get("api_provider") or "")
+        for item in parsed.get("models", [])
+    }
+    section = (parsed.get("model_task_config") or {}).get(task) or {}
+    names = [str(item) for item in section.get("model_list", [])]
+    return [(name, providers.get(name, "")) for name in names]
+
+
 def provision_model_config(
     *,
     settings: ProvisionSettings,
     plugin_dir: Path | None = None,
     logger: logging.Logger | None = None,
+    cc_settings: CcProvisionSettings | None = None,
 ) -> ProvisionResult:
-    """把 Provider 与预设模型写进 model_config.toml（幂等、可重复调用）。"""
+    """把 Provider 与预设模型写进 model_config.toml（幂等、可重复调用）。
+
+    Args:
+        settings: DeepSeek 网页版通道的自动注册设置。
+        plugin_dir: 插件目录（用于向上探测实例根）。
+        logger: 插件日志器。
+        cc_settings: CommandCode 通道的自动注册设置；为 None 或未启用时跳过。
+
+    Returns:
+        ProvisionResult: 本次结果（两个通道合并成一次写入与一份备份）。
+    """
 
     if tomlkit is None:  # pragma: no cover - 依赖缺失时只会走到这里
         return ProvisionResult(error="当前运行环境缺少 tomlkit，无法自动写入 model_config.toml")
@@ -312,17 +303,15 @@ def provision_model_config(
         return ProvisionResult(path=path, error="解析 model_config.toml 失败：" + str(exc))
 
     result = ProvisionResult(path=path)
-    if settings.wire_note:
-        result.warnings.append(settings.wire_note)
     blocked: set[str] = set()
     changed = _remove_legacy_planner(doc, settings=settings, result=result)
     changed = _ensure_provider(doc, settings=settings, result=result) or changed
     if result.error:
         return result
+    # 只注册模型，不接线：哪个任务用哪个模型由用户在 WebUI 里自己选（与 CommandCode 一致）。
     changed = _ensure_models(doc, settings=settings, result=result, blocked=blocked) or changed
-    if result.error:
-        return result
-    changed = _wire_tasks(doc, settings=settings, result=result, blocked=blocked) or changed
+    if cc_settings is not None and cc_settings.enabled:
+        changed = _provision_commandcode(doc, settings=cc_settings, result=result, blocked=blocked) or changed
 
     if not changed:
         result.ok = True
@@ -334,7 +323,7 @@ def provision_model_config(
         result.error = "生成新配置文本失败：" + str(exc)
         return result
 
-    problem = _validate(text, settings=settings, blocked=blocked)
+    problem = _validate(text, settings=settings, blocked=blocked, cc_settings=cc_settings)
     if problem:
         result.error = problem
         return result
@@ -423,6 +412,33 @@ def _remove_legacy_planner(doc: Any, *, settings: ProvisionSettings, result: Pro
 def _ensure_provider(doc: Any, *, settings: ProvisionSettings, result: ProvisionResult) -> bool:
     """确保 api_providers 里有本插件 Provider；返回是否有改动。"""
 
+    return _ensure_api_provider(
+        doc,
+        name=settings.provider_name,
+        base_url=DEFAULT_BASE_URL,
+        client_type=DEFAULT_CLIENT_TYPE,
+        timeout=DEFAULT_TIMEOUT_SEC,
+        max_retry=DEFAULT_MAX_RETRY,
+        result=result,
+    )
+
+
+def _ensure_api_provider(
+    doc: Any,
+    *,
+    name: str,
+    base_url: str,
+    client_type: str,
+    timeout: int,
+    max_retry: int,
+    result: ProvisionResult,
+) -> bool:
+    """确保 `[[api_providers]]` 里有指定 Provider，并修正关键字段。
+
+    Provider 条目的 `base_url` 只是占位：插件不是 HTTP 服务，真正的上游地址在插件内。
+    `max_retry=1` 让这个模型失败一次就轮到下一个模型，不在同一模型上重试。
+    """
+
     providers = doc.get("api_providers")
     if providers is None:
         providers = tomlkit.aot()
@@ -434,53 +450,51 @@ def _ensure_provider(doc: Any, *, settings: ProvisionSettings, result: Provision
 
     existing = None
     for item in providers:
-        if str(item.get("name") or "") == settings.provider_name:
+        if str(item.get("name") or "") == name:
             existing = item
             break
-        if str(item.get("client_type") or "") == DEFAULT_CLIENT_TYPE:
+        if str(item.get("client_type") or "") == client_type:
             existing = item
             break
 
+    expected = {
+        "base_url": base_url,
+        "client_type": client_type,
+        "auth_type": "none",
+        "api_key": "",
+        "timeout": timeout,
+        "max_retry": max_retry,
+    }
     if existing is not None:
         changed = False
-        expected = {
-            "base_url": DEFAULT_BASE_URL,
-            "client_type": DEFAULT_CLIENT_TYPE,
-            "auth_type": "none",
-            "api_key": "",
-            "timeout": DEFAULT_TIMEOUT_SEC,
-            # 关键：max_retry=1 表示这个模型失败一次就轮到下一个模型。
-            # Host 默认 3，会把一次失败放大成 3 次尝试（每次重试前还要再等
-            # 反封禁间隔），既慢又白白增加账号风险。
-            "max_retry": DEFAULT_MAX_RETRY,
-        }
         for key, value in expected.items():
             if existing.get(key) != value:
                 existing[key] = value
                 changed = True
         if changed:
-            result.applied.append("修正 Provider " + settings.provider_name + " 的字段")
+            result.applied.append("修正 Provider " + name + " 的字段")
         else:
-            result.skipped.append("Provider 已存在")
+            result.skipped.append("Provider " + name + " 已存在")
         return changed
 
     provider = tomlkit.table()
-    provider["name"] = settings.provider_name
-    provider["base_url"] = DEFAULT_BASE_URL
+    provider["name"] = name
+    provider["base_url"] = base_url
     provider["api_key"] = ""
-    provider["client_type"] = DEFAULT_CLIENT_TYPE
+    provider["client_type"] = client_type
     provider["auth_type"] = "none"
-    provider["timeout"] = DEFAULT_TIMEOUT_SEC
-    provider["max_retry"] = DEFAULT_MAX_RETRY
+    provider["timeout"] = timeout
+    provider["max_retry"] = max_retry
     providers.append(provider)
-    result.applied.append("新增 Provider " + settings.provider_name)
+    result.applied.append("新增 Provider " + name)
     return True
 
 
 def _ensure_models(
     doc: Any, *, settings: ProvisionSettings, result: ProvisionResult, blocked: set[str]
 ) -> bool:
-    """确保 models 里有三个预设模型；返回是否有改动。"""
+    """确保 models 里有预设模型（只注册、不接线）；返回是否有改动。"""
+
 
     models = doc.get("models")
     if models is None:
@@ -530,98 +544,214 @@ def _build_model(plan: ModelPlan, *, provider_name: str) -> Any:
     return model
 
 
-def _wire_tasks(
-    doc: Any, *, settings: ProvisionSettings, result: ProvisionResult, blocked: set[str]
+def _provision_commandcode(
+    doc: Any,
+    *,
+    settings: CcProvisionSettings,
+    result: ProvisionResult,
+    blocked: set[str],
 ) -> bool:
-    """按通道模式把预设模型接进（或移出）任务 model_list；返回是否有改动。
+    """注册 CommandCode Provider 与模型（**不接任何任务**）。"""
 
-    - `web_first` / `web_only`：把预设模型插到 `model_list` 首位并固定 `sequential`，
-      让网页版优先被选中；其余调度交给 MaiBot；
-    - `official_only`：把本插件模型从 `model_list` 里移除，让任务直接走其它模型。
-    """
-
-    tasks = doc.get("model_task_config")
-    if tasks is None:
-        result.warnings.append("model_config.toml 缺少 model_task_config 小节，跳过任务接线")
-        return False
-
-    detach = settings.mode == "official_only"
-    changed = False
-    for task in settings.wire_tasks:
-        model_name = TASK_MODEL_MAP.get(task)
-        if model_name is None:
-            unsupported = UNSUPPORTED_WIRE_TASKS.get(task)
-            if unsupported:
-                result.warnings.append("任务 " + task + " 跳过：" + unsupported)
-            else:
-                result.warnings.append("任务 " + task + " 没有对应的预设模型，跳过")
-            continue
-        if model_name in blocked:
-            result.warnings.append("任务 " + task + " 的目标模型 " + model_name + " 被占用，跳过接线")
-            continue
-        try:
-            section = tasks[task]
-        except (KeyError, TypeError):
-            result.warnings.append("model_config.toml 里没有任务 " + task + "，跳过")
-            continue
-        if not hasattr(section, "get"):
-            result.warnings.append("任务 " + task + " 的配置不是表结构，跳过")
-            continue
-        model_list = section.get("model_list")
-        if model_list is None:
-            result.warnings.append("任务 " + task + " 缺少 model_list，跳过")
-            continue
-        names = [str(item) for item in model_list]
-        if detach:
-            if model_name not in names:
-                result.skipped.append("任务 " + task + " 未接线")
-                continue
-            rebuilt = tomlkit.array()
-            for name in names:
-                if name != model_name:
-                    rebuilt.append(name)
-            section["model_list"] = rebuilt
-            result.applied.append("按 official_only 从任务 " + task + " 移除 " + model_name)
-            changed = True
-            if len(rebuilt) == 0:
-                result.warnings.append(
-                    "任务 " + task + " 的 model_list 在移除 " + model_name + " 后为空，请在 official_only 下补一个官方模型"
-                )
-            continue
-        touched = False
-        if model_name not in names:
-            rebuilt = tomlkit.array()
-            rebuilt.append(model_name)
-            for name in names:
-                rebuilt.append(name)
-            section["model_list"] = rebuilt
-            touched = True
-        if str(section.get("selection_strategy") or "") != settings.selection_strategy:
-            section["selection_strategy"] = settings.selection_strategy
-            touched = True
-        if touched:
-            result.applied.append("接线任务 " + task + " → " + model_name)
-            changed = True
-        else:
-            result.skipped.append("任务 " + task + " 已接线")
-        # 可选用任务（JSON 输出 / 等待路径）接线时给一条风险提示，不阻止接线。
-        caveat = TASK_WIRE_CAVEATS.get(task)
-        if caveat:
-            result.warnings.append("任务 " + task + "：" + caveat)
-        # 任务只有一个模型时，这个模型失败就没有其它可选模型了，必须明确告警。
-        final_names = [str(item) for item in section.get("model_list") or []]
-        if all(name == model_name for name in final_names):
-            result.warnings.append(
-                "任务 "
-                + task
-                + " 的 model_list 只有 "
-                + model_name
-                + "；该模型失败时这个任务没有其它可选模型，建议在 model_list 末尾补一个官方模型"
-            )
+    changed = _ensure_api_provider(
+        doc,
+        name=settings.provider_name,
+        base_url=CC_BASE_URL,
+        client_type=CC_CLIENT_TYPE,
+        timeout=DEFAULT_TIMEOUT_SEC,
+        max_retry=DEFAULT_MAX_RETRY,
+        result=result,
+    )
+    if result.error:
+        return changed
+    selection = cc_selection(settings)
+    if not selection:
+        result.warnings.append(
+            "CommandCode 模型清单为空（register_models="
+            + settings.register_models
+            + "），只保留 Provider 条目"
+        )
+    changed = _ensure_cc_models(doc, settings=settings, selection=selection, result=result, blocked=blocked) or changed
+    if result.error:
+        return changed
+    changed = _remove_stale_cc_models(doc, settings=settings, selection=selection, result=result) or changed
     return changed
 
 
-def _validate(text: str, *, settings: ProvisionSettings, blocked: set[str]) -> str:
+def cc_selection(settings: CcProvisionSettings) -> tuple[Any, ...]:
+    """按注册模式与 include/exclude 选出要注册的模型。"""
+
+    try:  # 延迟导入：没有生成目录时 provision 仍然可用
+        from .commandcode.catalog import load_catalog
+
+        return load_catalog().select(
+            mode=settings.register_models,
+            include=settings.model_include,
+            exclude=settings.model_exclude,
+        )
+    except Exception:  # noqa: BLE001 - 目录损坏不应阻塞 DeepSeek 通道的自动注册
+        return ()
+
+
+def _cc_model_name(model: Any, prefix: str) -> str:
+    """按 `model_prefix` 生成模型名（目录里默认已经是 `cc-` 开头）。"""
+
+    name = str(getattr(model, "name", "") or "")
+    if prefix and prefix != CC_MODEL_PREFIX and name.startswith(CC_MODEL_PREFIX):
+        return prefix + name[len(CC_MODEL_PREFIX) :]
+    return name
+
+
+def _build_cc_model(model: Any, *, name: str, provider_name: str) -> Any:
+    """构造一条 CommandCode 的 [[models]] 记录。"""
+
+    entry = tomlkit.table()
+    entry["model_type"] = "llm"
+    entry["model_identifier"] = str(getattr(model, "model_identifier", "") or "")
+    entry["name"] = name
+    entry["api_provider"] = provider_name
+    # 不要写美元单价：MaiBot 按人民币统计，填了会误报；本插件用 [commandcode] 的金额预算。
+    entry["price_in"] = 0.0
+    entry["price_out"] = 0.0
+    entry["send_temperature"] = False
+    entry["force_stream_mode"] = False
+    if bool(getattr(model, "visual", False)):
+        entry["visual"] = True
+    return entry
+
+
+def _ensure_cc_models(
+    doc: Any,
+    *,
+    settings: CcProvisionSettings,
+    selection: tuple[Any, ...],
+    result: ProvisionResult,
+    blocked: set[str],
+) -> bool:
+    """确保 models 里有全部 CommandCode 模型（幂等）；返回是否有改动。"""
+
+    models = doc.get("models")
+    if models is None:
+        models = tomlkit.aot()
+        doc["models"] = models
+        result.applied.append("新建 models 小节")
+    elif not isinstance(models, list):
+        result.error = "model_config.toml 的 models 不是 [[models]] 数组，无法自动写入"
+        return False
+
+    index = {str(item.get("name") or ""): item for item in models}
+    added: list[str] = []
+    fixed = 0
+    for model in selection:
+        name = _cc_model_name(model, settings.model_prefix)
+        if not name:
+            continue
+        current = index.get(name)
+        if current is None:
+            models.append(_build_cc_model(model, name=name, provider_name=settings.provider_name))
+            index[name] = None
+            added.append(name)
+            continue
+        if str(current.get("api_provider") or "") != settings.provider_name:
+            blocked.add(name)
+            result.warnings.append(
+                "模型 " + name + " 已被其他服务商占用，跳过（如需使用请改 model_prefix）"
+            )
+            continue
+        expected: dict[str, Any] = {
+            "model_identifier": str(getattr(model, "model_identifier", "") or ""),
+            "force_stream_mode": False,
+            "send_temperature": False,
+            "price_in": 0.0,
+            "price_out": 0.0,
+        }
+        if bool(getattr(model, "visual", False)):
+            expected["visual"] = True
+        touched = False
+        for key, value in expected.items():
+            if current.get(key) != value:
+                current[key] = value
+                touched = True
+        if touched:
+            fixed += 1
+
+    changed = False
+    if added:
+        result.applied.append(f"新增 CommandCode 模型 {len(added)} 条（{settings.model_prefix}*）")
+        changed = True
+    if fixed:
+        result.applied.append(f"修正 CommandCode 模型 {fixed} 条")
+        changed = True
+    if not added and not fixed:
+        result.skipped.append(f"CommandCode 模型已是最新（{len(selection)} 条）")
+    return changed
+
+
+def _remove_stale_cc_models(
+    doc: Any,
+    *,
+    settings: CcProvisionSettings,
+    selection: tuple[Any, ...],
+    result: ProvisionResult,
+) -> bool:
+    """移除不再属于注册集合的 `cc-*` 模型，并把它们从任务 model_list 里摘掉。
+
+    只处理 `api_provider = 本通道` 且名字带前缀的模型：用户手工加在其它服务商下的模型不动。
+    """
+
+    desired = {_cc_model_name(model, settings.model_prefix) for model in selection}
+    models = doc.get("models")
+    if not isinstance(models, list):
+        return False
+    keep: list[Any] = []
+    removed: list[str] = []
+    for item in models:
+        name = str(item.get("name") or "")
+        provider = str(item.get("api_provider") or "")
+        if provider == settings.provider_name and name.startswith(settings.model_prefix) and name not in desired:
+            removed.append(name)
+            continue
+        keep.append(item)
+    if not removed:
+        return False
+    rebuilt = tomlkit.aot()
+    for item in keep:
+        rebuilt.append(item)
+    doc["models"] = rebuilt
+    result.applied.append(f"移除不再注册的 CommandCode 模型 {len(removed)} 条")
+    detached = _detach_model_names(doc, set(removed))
+    if detached:
+        result.applied.append(f"从 {detached} 个任务的 model_list 移除这些模型")
+    return True
+
+
+def _detach_model_names(doc: Any, names: set[str]) -> int:
+    """把指定模型名从所有任务 `model_list` 里移除；返回受影响的任务数。"""
+
+    tasks = doc.get("model_task_config")
+    if not hasattr(tasks, "get"):
+        return 0
+    touched = 0
+    for task_name in list(tasks.keys()):
+        section = tasks[task_name]
+        if not hasattr(section, "get"):
+            continue
+        model_list = section.get("model_list")
+        if model_list is None:
+            continue
+        current = [str(item) for item in model_list]
+        if not any(name in names for name in current):
+            continue
+        rebuilt = tomlkit.array()
+        for name in current:
+            if name not in names:
+                rebuilt.append(name)
+        section["model_list"] = rebuilt
+        touched += 1
+    return touched
+
+
+def _validate(text: str, *, settings: ProvisionSettings, blocked: set[str], cc_settings: CcProvisionSettings | None = None) -> str:
     """用 tomllib 复核生成的配置文本；返回错误说明，空串表示通过。"""
 
     try:
@@ -653,21 +783,6 @@ def _validate(text: str, *, settings: ProvisionSettings, blocked: set[str]) -> s
         if str(item.get("api_provider") or "") != settings.provider_name:
             return "模型 " + plan.name + " 的 api_provider 不是 " + settings.provider_name
 
-    detach = settings.mode == "official_only"
-    for task in settings.wire_tasks:
-        section = parsed.get("model_task_config", {}).get(task)
-        if section is None:
-            continue
-        names = [str(item) for item in section.get("model_list", [])]
-        target = TASK_MODEL_MAP.get(task)
-        if target is None or target in blocked:
-            continue
-        if detach:
-            if target in names:
-                return "任务 " + task + " 在 official_only 下仍包含 " + target
-        elif target not in names:
-            return "任务 " + task + " 的 model_list 未包含 " + target
-
     # 旧版 planner 模型必须已被清理：它不能承担工具调用，留在配置里只会误导用户。
     for task_name, section in (parsed.get("model_task_config") or {}).items():
         names = [str(item) for item in section.get("model_list", [])]
@@ -679,6 +794,39 @@ def _validate(text: str, *, settings: ProvisionSettings, blocked: set[str]) -> s
         for item in parsed.get("models", [])
     ):
         return "生成的配置里仍包含已废弃模型 " + LEGACY_PLANNER_MODEL
+
+    if cc_settings is not None and cc_settings.enabled:
+        problem = _validate_commandcode(parsed, settings=cc_settings, blocked=blocked)
+        if problem:
+            return problem
+    return ""
+
+
+def _validate_commandcode(parsed: dict[str, Any], *, settings: CcProvisionSettings, blocked: set[str]) -> str:
+    """校验生成文本里的 CommandCode Provider 与模型；返回错误说明。"""
+
+    providers = {
+        str(item.get("name") or ""): item for item in parsed.get("api_providers", [])
+    }
+    provider = providers.get(settings.provider_name)
+    if provider is None:
+        return "生成的配置里找不到 CommandCode Provider " + settings.provider_name
+    if provider.get("max_retry") != DEFAULT_MAX_RETRY:
+        return "CommandCode Provider 的 max_retry 未设为 " + str(DEFAULT_MAX_RETRY)
+    if str(provider.get("client_type") or "") != CC_CLIENT_TYPE:
+        return "CommandCode Provider 的 client_type 不是 " + CC_CLIENT_TYPE
+    models = {str(item.get("name") or ""): item for item in parsed.get("models", [])}
+    for model in cc_selection(settings):
+        name = _cc_model_name(model, settings.model_prefix)
+        if name in blocked:
+            continue
+        item = models.get(name)
+        if item is None:
+            return "生成的配置里缺少 CommandCode 模型 " + name
+        if str(item.get("api_provider") or "") != settings.provider_name:
+            return "CommandCode 模型 " + name + " 的 api_provider 不是 " + settings.provider_name
+        if str(item.get("model_identifier") or "") != str(getattr(model, "model_identifier", "")):
+            return "CommandCode 模型 " + name + " 的 model_identifier 与目录不一致"
     return ""
 
 

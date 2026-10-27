@@ -1,10 +1,17 @@
 # 各模型任务对「纯文本反代」的适配性
 
+> 状态：**现行设计**　最后更新：2026-10-27　适用版本：0.4.0（结论来自 1.3.11 源码核查）
 > 结论先行：这个插件只提供**纯文本生成**——**没有 function calling、没有视觉、没有 embedding、没有逐字流式**。
 > 所以 MaiBot 的模型任务里，只有"纯文本进、纯文本出、不要求严格 JSON"的那几个适合接；缺了其中任意一条的，
 > 接了也不会报错，而是**在业务层被静默吞掉**（丢记忆、丢评分、不拆句），比报错更难排查。
 >
 > 结论基于 **MaiBot 1.3.11 源码核查**（2026-10-22）。插件默认自动注册只接 `replyer` + `utils`。
+>
+> **0.4.0 补充**：本文只针对 **DeepSeek 网页版通道**。同插件的 **CommandCode（Go）通道**支持
+> function calling 与视觉：`planner` / `vlm` 可以接 `cc-*` 模型（建议 Kimi K3 / GLM-5.3 / DeepSeek V4 Pro），
+> 但**插件不会自动接线**，需要你在 WebUI 里自行选择；JSON 类任务（`memory` / `learner`）仍然不建议。
+> 详见 [COMMANDCODE-FEASIBILITY.md](../research/COMMANDCODE-FEASIBILITY.md) 与
+> [research/commandcode/P1-RESULTS.md](../research/commandcode/P1-RESULTS.md)。
 
 ## 1. 结论速览
 

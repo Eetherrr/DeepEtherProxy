@@ -21,7 +21,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件；禁用后本 Provider 不再注册到 Host")
-    config_version: str = Field(default="0.2.0", description="配置版本号，用于识别配置结构升级")
+    config_version: str = Field(default="0.5.0", description="配置版本号，用于识别配置结构升级")
 
 
 class ProvisionConfig(PluginConfigBase):
@@ -34,8 +34,8 @@ class ProvisionConfig(PluginConfigBase):
     enabled: bool = Field(
         default=True,
         description=(
-            "插件加载时自动把 Provider 与三个预设模型写进 Host 的 config/model_config.toml，"
-            "并把 deepether 模型接到任务 model_list 的首位。Host 会热重载该文件、无需重启；"
+            "插件加载时把 Provider 与预设模型注册进 Host 的 config/model_config.toml（只注册、不接线）。"
+            "哪个任务用哪个模型由你在 WebUI 里自己选，与 CommandCode 通道的做法一致；"
             "写入前自动备份，内容无变化时不落盘"
         ),
     )
@@ -50,19 +50,7 @@ class ProvisionConfig(PluginConfigBase):
             "MAIBOT_INSTANCE_DIR/config/model_config.toml，再按插件目录向上找实例根"
         ),
     )
-    wire_tasks: str = Field(
-        default="replyer,utils",
-        description=(
-            "要接到预设模型上的纯文本任务名，逗号分隔；可选 replyer/utils/memory/mid_memory/fast_model/learner。"
-            "planner 需要工具调用（function calling）、emoji 需要视觉，网页版做不到，写进去会被忽略并告警。"
-            "memory/mid_memory/learner 输出要求 JSON、fast_model 在回复等待路径上，开启前请评估。"
-            "留空表示只注册模型、不改任务配置"
-        ),
-    )
-    selection_strategy: Literal["sequential", "balance", "random"] = Field(
-        default="sequential",
-        description="接线时写入的选择策略；必须 sequential，只有按顺序优先才会先走网页版",
-    )
+
     keep_backup: bool = Field(default=True, description="写入前备份原 model_config.toml（最多保留 5 份）")
 
 
@@ -73,14 +61,15 @@ class CredentialConfig(PluginConfigBase):
     __ui_icon__ = "key"
     __ui_order__ = 2
 
-    web_token: str = Field(
-        default="",
+    web_tokens: list[str] = Field(
+        default_factory=list,
         description=(
-            "【必填】DeepSeek 网页版登录 token。获取方法：登录 chat.deepseek.com 后按 F12 打开控制台，"
-            "执行 copy(JSON.parse(localStorage.getItem('userToken')).value) 复制，粘贴到本项。"
-            "它是 Bearer token（不是 cookie），过期时重新获取一次即可"
+            "【必填】DeepSeek 网页版登录 token，可以填多个（数组）。获取方法：登录 chat.deepseek.com 后按 F12，"
+            "控制台执行 copy(JSON.parse(localStorage.getItem('userToken')).value) 复制粘贴。"
+            "多个 token 会在“不在冷却中”的账号之间轮换，提高可用额度；只有一个时就是单账号行为"
         ),
     )
+
     loopback_enabled: bool = Field(
         default=False,
         description=(
@@ -130,6 +119,7 @@ class BehaviorConfig(PluginConfigBase):
         ),
     )
     model_type: str = Field(default="default", description="网页版 model_type 参数，保持默认即可")
+
     request_timeout_sec: int = Field(default=180, ge=10, le=600, description="单次上游请求的软超时（秒）")
     max_history_chars: int = Field(
         default=60000,
@@ -176,7 +166,7 @@ class ConcurrencyConfig(PluginConfigBase):
 class AntibanConfig(PluginConfigBase):
     """反封禁节奏控制（pacing / 配额 / 会话复用）。
 
-    这一节的每个字段都是降低账号被风控封禁概率的旋钮，取值依据见 docs/ANTIBAN.md。
+    这一节的每个字段都是降低账号被风控封禁概率的旋钮，取值依据见 docs/design/ANTIBAN.md。
     调低是安全的，调高之前请先确认上游行为没有变化。
     """
 
@@ -205,12 +195,15 @@ class AntibanConfig(PluginConfigBase):
         description="抖动比例；0 表示不加抖动（不建议），0.25 表示最多在区间上再放宽四分之一",
     )
     max_per_minute: int = Field(default=3, ge=1, le=60, description="每分钟最多调用几次网页版，超过则本次调用直接失败")
-    max_per_hour: int = Field(default=30, ge=1, le=3600, description="每小时最多调用几次网页版")
+    max_per_hour: int = Field(default=45, ge=1, le=3600, description="每小时最多调用几次网页版（夜间按 quiet_hours_ratio 缩）")
     max_per_day: int = Field(
-        default=200,
+        default=400,
         ge=1,
         le=20000,
-        description="每天最多调用几次网页版；真人重度使用约在 100~200 次，超过基本可判定为自动化",
+        description=(
+            "每天最多调用几次网页版（滚动 24 小时窗口）。这一项是硬上限，实际生效值还会被自适应预算压小；"
+            "调高它只是放宽天花板，真正的行为特征约束是分/时两级配额与节奏"
+        ),
     )
     cooldown_on_rate_limit_sec: int = Field(
         default=900,
@@ -229,14 +222,90 @@ class AntibanConfig(PluginConfigBase):
         description="是否让冷却后的请求间隔自动翻倍（连续命中风控时逐步退避，成功一次后折半恢复）",
     )
     session_reuse_calls: int = Field(
-        default=8,
+        default=20,
         ge=1,
         le=100,
-        description="同一个上游会话最多复用于多少次调用；每轮都新建会话是明显的机器行为",
+        description="同一个上游会话最多复用于多少次调用；每轮都新建会话是明显的机器行为，调大更接近真人一个话题的长度",
+    )
+    adaptive_budget: bool = Field(
+        default=True,
+        description=(
+            "自适应日预算（AIMD）：命中风控信号时把整体日预算按比例回撤，连续成功后再缓慢爬回。"
+            "开启后 max_per_day 只是天花板，实际额度会自己找到不触发风控的水平"
+        ),
+    )
+    min_adaptive_budget: int = Field(
+        default=200,
+        ge=1,
+        le=20000,
+        description=(
+            "自适应预算回撤后的绝对下限（次/天）；默认 200，不要比旧版硬配额更小，"
+            "否则一次误判就会让容量反而低于升级前"
+        ),
+    )
+    quota_wait_max_sec: float = Field(
+        default=25.0,
+        ge=0.0,
+        le=120.0,
+        description=(
+            "分/时配额一时打满时，高优先级模型（reserve_models）最多等多少秒再失败；"
+            "0 表示不等待。等待不改变上游请求速率，只是不再把突发整段推给付费模型"
+        ),
+    )
+    quiet_hours: str = Field(
+        default="01:00-07:00",
+        description=(
+            "夜间节律区间（HH:MM-HH:MM，支持跨零点，例如 23:00-06:00）；空串表示不启用。"
+            "深夜把分/时配额压低，避免 24 小时匀速不停这种最像机器的形态"
+        ),
+    )
+    quiet_hours_ratio: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        description="夜间把分/时配额乘以这个比例（默认 0.25，即深夜只剩 1/4 的速率，不会完全不可用）",
+    )
+    model_daily_limits: str = Field(
+        default="",
+        description=(
+            "按模型名的每日上限，逗号分隔，例如 deepether-utils=180；留空表示不细分。"
+            "主要有用的一档是给后台 utils 单独限流，避免它把日额度吃光、replyer 反而没额度"
+        ),
+    )
+    reserve_daily_budget: int = Field(
+        default=60,
+        ge=0,
+        le=20000,
+        description="日预算里留给高优先级模型的次数：额度剩这么多时，非保留模型直接失败，保证回复始终有额度",
+    )
+    reserve_models: str = Field(
+        default="deepether-replyer",
+        description="可动用保留额度的高优先级模型名，逗号分隔（默认只有 replyer）",
     )
     persist_state: bool = Field(
         default=True,
         description="是否把配额与冷却状态落盘；关闭后重启插件等于配额清零（不建议）",
+    )
+
+
+class CommandCodeConfig(PluginConfigBase):
+    """CommandCode（Go 套餐）反代通道：只需要填一个 Key。
+
+    其余参数（上游地址、CLI 版本、超时、并发、预算上限、模型注册范围、视觉/工具策略）
+    全部使用代码内默认值，不再暴露给用户；需要调整时改 constants 里的常量。
+    默认只注册模型、不接线；在 WebUI 里把 cc-* 模型加到任务 model_list 才会生效。
+    """
+
+    __ui_label__ = "CommandCode（Go 套餐）"
+    __ui_icon__ = "terminal"
+    __ui_order__ = 8
+
+    api_key: str = Field(
+        default="",
+        description=(
+            "【必填】CommandCode Studio API Key（commandcode.ai/studio 生成；CLI 登录后也可从 "
+            "~/.commandcode/auth.json 的 apiKey 取）。留空表示不使用这条通道（不会注册 cc-* 模型）"
+        ),
     )
 
 
@@ -261,4 +330,5 @@ class DeepEtherProxyConfig(PluginConfigBase):
     behavior: BehaviorConfig = Field(default_factory=BehaviorConfig)
     concurrency: ConcurrencyConfig = Field(default_factory=ConcurrencyConfig)
     antiban: AntibanConfig = Field(default_factory=AntibanConfig)
+    commandcode: CommandCodeConfig = Field(default_factory=CommandCodeConfig)
     debug: DebugConfig = Field(default_factory=DebugConfig)

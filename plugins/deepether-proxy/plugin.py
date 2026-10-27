@@ -13,23 +13,38 @@ from pathlib import Path
 from typing import Any
 
 import logging
+import os
 import secrets
+import tomllib
 
-from maibot_sdk import Command, LLMProvider, MaiBotPlugin
+from maibot_sdk import Command, HookHandler, LLMProvider, MaiBotPlugin
+from maibot_sdk.types import HookMode
 
 from .deepether.bookmarklet import build_bookmarklet
+from .deepether.commandcode.catalog import load_catalog
+from .deepether.commandcode.provider import CommandCodeProvider
+from .deepether.commandcode.state import CcRuntimeState
+from .deepether.commandcode.status import render_commandcode_models, render_commandcode_status
 from .deepether.config import DeepEtherProxyConfig
 from .deepether.credential import SOURCE_BOOKMARKLET, SOURCE_CONFIG, CredentialStore
 from .deepether.errors import mask_secret
 from .deepether.loopback import CredentialLoopbackServer
 from .deepether.provider import DeepEtherProvider
-from .deepether.provision import ProvisionResult, provision_model_config, settings_from_config
+from .deepether.provision import (
+    CC_PROVIDER_NAME,
+    ProvisionResult,
+    cc_settings_from_config,
+    detect_model_config,
+    provision_model_config,
+    settings_from_config,
+)
 from .deepether.selftest import PeriodicProbe
 from .deepether.state import RuntimeState
 from .deepether.status import render_status
 
 CLIENT_TYPE: str = "com.ether.deepether"
-PROVIDER_VERSION: str = "0.3.1"
+CLIENT_TYPE_COMMANDCODE: str = "com.ether.commandcode"
+PROVIDER_VERSION: str = "0.5.0"
 NONCE_FILE_NAME: str = "nonce.txt"
 BOOKMARKLET_FILE_NAME: str = "bookmarklet.txt"
 
@@ -44,6 +59,7 @@ class DeepEtherProxyPlugin(MaiBotPlugin):
 
         super().__init__()
         self._provider: DeepEtherProvider | None = None
+        self._cc_provider: CommandCodeProvider | None = None
         self._store: CredentialStore | None = None
         self._state: RuntimeState = RuntimeState()
         self._loopback: CredentialLoopbackServer | None = None
@@ -79,6 +95,7 @@ class DeepEtherProxyPlugin(MaiBotPlugin):
             return
 
         self._provider = DeepEtherProvider(self)
+        self._cc_provider = CommandCodeProvider(self)
         self._state = RuntimeState()
 
         try:
@@ -107,6 +124,13 @@ class DeepEtherProxyPlugin(MaiBotPlugin):
             config.concurrency.max_concurrency,
             self._describe_credential(),
         )
+        cc_section = getattr(config, "commandcode", None)
+        logger.info(
+            "CommandCode 通道：%s / Key=%s / 模型目录 %d 条",
+            "已启用" if getattr(cc_section, "enabled", True) else "已关闭",
+            mask_secret(str(getattr(cc_section, "api_key", "") or "")),
+            len(load_catalog()),
+        )
 
         self.run_provision()
 
@@ -123,6 +147,9 @@ class DeepEtherProxyPlugin(MaiBotPlugin):
         if self._provider is not None:
             await self._provider.aclose()
         self._provider = None
+        if self._cc_provider is not None:
+            await self._cc_provider.aclose()
+        self._cc_provider = None
         logger.info("DeepEther Proxy 已卸载，Provider 已注销、凭证接收服务已停止")
 
     async def on_config_update(self, scope: str, config_data: dict[str, Any], version: str) -> None:
@@ -146,6 +173,8 @@ class DeepEtherProxyPlugin(MaiBotPlugin):
             return
 
         self._sync_config_token(config, logger)
+        if self._provider is not None:
+            self._provider.invalidate_model_cache()
 
         need_restart = (
             config.credential.credential_port != self._loopback_port
@@ -197,7 +226,7 @@ class DeepEtherProxyPlugin(MaiBotPlugin):
 
         if self._store is None:
             return
-        configured = config.credential.web_token.strip()
+        configured = (config.credential.web_tokens[0].strip() if config.credential.web_tokens else "")
         if not configured:
             return
         record = self._store.record
@@ -206,7 +235,7 @@ class DeepEtherProxyPlugin(MaiBotPlugin):
         try:
             self._store.save(configured, SOURCE_CONFIG)
         except ValueError as exc:
-            logger.warning("配置里的 web_token 无法保存：%s", exc)
+            logger.warning("配置里的 web_tokens 无法保存：%s", exc)
 
     def _handle_incoming_token(self, token: str) -> bool:
         """处理书签小工具提交的 token。
@@ -291,7 +320,7 @@ class DeepEtherProxyPlugin(MaiBotPlugin):
         if not config.credential.loopback_enabled:
             # 发布形态：不需要本地服务，token 由用户从浏览器控制台取出后填进插件配置（WebUI 可改）。
             logger.info(
-                "未启用本地授权服务（默认关闭）。请在 WebUI 插件配置的 credential.web_token 填入网页版 token"
+                "未启用本地授权服务（默认关闭）。请在 WebUI 插件配置的 credential.web_tokens 填入网页版 token"
             )
             return
 
@@ -415,6 +444,7 @@ class DeepEtherProxyPlugin(MaiBotPlugin):
                 settings=settings,
                 plugin_dir=Path(__file__).parent,
                 logger=logger,
+                cc_settings=cc_settings_from_config(config),
             )
         except Exception as exc:  # noqa: BLE001 - 自动注册失败绝不能影响 Provider 注册
             result = ProvisionResult(error="自动注册过程异常：" + str(exc))
@@ -430,6 +460,63 @@ class DeepEtherProxyPlugin(MaiBotPlugin):
         for warning in result.warnings:
             logger.info("自动注册提示：%s", warning)
         return result
+
+    # ─── 额度让位 Hook（replyer） ───────────────────────────────────────
+
+    @HookHandler(
+        "maisaka.replyer.before_request",
+        name="deepether_replyer_yield",
+        description="网页版没有容量时，把本轮 replyer 改走官方模型（无失败、无错误日志）",
+        mode=HookMode.BLOCKING,
+        timeout_ms=800,
+    )
+    async def handle_replyer_before_request(self, **kwargs: Any) -> dict[str, Any]:
+        """replyer 请求模型前：网页版额度不够就改走官方模型。
+
+        这是「额度耗尽时不报 error」的唯一干净路径：Host 的模型调度只看失败，
+        而额度只有插件知道；在请求前改写 model_name，本轮就不会去碰网页版。
+        只做本地判断（读 pacing 快照 + 读一次 model_config），不发请求、不睡眠。
+
+        Args:
+            **kwargs: Host 传入的 hook 参数（含 task_name / model_name 等）。
+
+        Returns:
+            dict[str, Any]: BLOCKING hook 的标准返回；异常时原样放行。
+        """
+
+        try:
+            provider = self._provider
+            if provider is None:
+                return {"action": "continue", "modified_kwargs": kwargs}
+            target = self._yield_target(provider)
+            if not target:
+                return {"action": "continue", "modified_kwargs": kwargs}
+            if str(kwargs.get("model_name") or "") == target:
+                return {"action": "continue", "modified_kwargs": kwargs}
+            kwargs["model_name"] = target
+            provider.note_yield(target)
+        except Exception as exc:  # noqa: BLE001 - hook 绝不能把回复打断
+            self.get_logger().warning("额度让位 hook 执行失败（按原参数继续）：%s", exc)
+        return {"action": "continue", "modified_kwargs": kwargs}
+
+    def _yield_target(self, provider: Any) -> str | None:
+        """按 replyer 当前会用的通道判断是否让位，并返回应改用的模型。
+
+        - 第一个模型是网页版：交给 provider 自己判断额度/冷却/熔断；
+        - 第一个模型是 CommandCode：看 CC 的预算/熔断；
+        - 第一个是官方模型：本轮本来就不会用插件，不干预。
+        """
+
+        first = provider.first_replyer_model()
+        if first is None:
+            return None
+        _name, provider_name = first
+        if provider_name == CC_PROVIDER_NAME:
+            cc = self._cc_provider
+            if cc is None or cc.capacity_block_reason() is None:
+                return None
+            return provider.next_official_model()
+        return provider.replyer_yield_target()
 
     # ─── 状态命令 ───────────────────────────────────────────────────────
 
@@ -458,33 +545,89 @@ class DeepEtherProxyPlugin(MaiBotPlugin):
                 self.get_logger().warning("状态文本发送失败，改为作为命令返回值输出：%s", exc)
         return True, text, True
 
-    @Command(
-        "deepether-setup",
-        description="重新把 Provider 与预设模型写进 Host 的 model_config.toml",
-        pattern=r"^/deepether-setup$",
-    )
-    async def handle_setup_command(self, **kwargs: Any) -> tuple[bool, str | None, bool]:
-        """手动重跑自动注册，并回报结果。
 
-        Args:
-            **kwargs: 宿主流入的命令上下文，包含 `stream_id` 等。
 
-        Returns:
-            tuple[bool, str | None, bool]: `(是否成功, 返回文本, 是否拦截后续消息)`。
-        """
+    async def _reply_text(self, text: str, kwargs: dict[str, Any]) -> tuple[bool, str | None, bool]:
+        """优先通过会话发送文本，失败时退回命令返回值。"""
 
-        result = self.run_provision(force=True)
-        text = "自动注册结果：\n" + result.summary()
-        if not result.ok:
-            text = text + "\n可手动指定 model_config_path，或在 WebUI 里手工新增模型与服务商。"
         stream_id = str(kwargs.get("stream_id") or "")
         if stream_id:
             try:
                 await self.ctx.send.text(text, stream_id)
                 return True, None, True
             except Exception as exc:  # noqa: BLE001 - 发不出去就退化成返回值
-                self.get_logger().warning("自动注册结果发送失败，改为作为命令返回值输出：%s", exc)
+                self.get_logger().warning("命令文本发送失败，改为作为返回值输出：%s", exc)
         return True, text, True
+
+    def build_commandcode_status_text(self) -> str:
+        """构造 CommandCode 状态文本。"""
+
+        try:
+            config = self.config
+        except RuntimeError:
+            return "DeepEther Proxy 配置尚未注入，暂时无法读取 CommandCode 状态"
+        section = getattr(config, "commandcode", None)
+        provider = self._cc_provider
+        registered = self._registered_cc_models(config)
+        budget = provider.budget_snapshot if provider is not None else {}
+        circuit = provider.circuit_state if provider is not None else "closed"
+        in_flight, limit = provider.gate_status if provider is not None else (0, 0)
+        rejected = provider.gate_rejected if provider is not None else 0
+        return render_commandcode_status(
+            version=PROVIDER_VERSION,
+            enabled=bool(str(getattr(section, "api_key", "") or "").strip()),
+            api_key=str(getattr(section, "api_key", "") or ""),
+            base_url=str(getattr(section, "base_url", "") or ""),
+            cli_version=str(getattr(section, "cli_version", "") or ""),
+            catalog=load_catalog(),
+            register_models=str(getattr(section, "register_models", "all") or "all"),
+            registered_models=len(registered),
+            state=provider.state if provider is not None else CcRuntimeState(),
+            budget=budget,
+            circuit_state=circuit,
+            gate_in_flight=in_flight,
+            gate_limit=limit,
+            gate_rejected=rejected,
+            last_model=provider.last_model if provider is not None else "",
+            thread_id=provider.thread_id if provider is not None else "",
+            provision=self._provision.summary() if self._provision is not None else None,
+        )
+
+    def build_commandcode_models_text(self) -> str:
+        """构造 CommandCode 模型清单文本。"""
+
+        try:
+            config = self.config
+        except RuntimeError:
+            return "DeepEther Proxy 配置尚未注入，暂时无法读取模型目录"
+        return render_commandcode_models(load_catalog(), self._registered_cc_models(config))
+
+    def _registered_cc_models(self, config: DeepEtherProxyConfig) -> list[str]:
+        """从 Host 的 model_config.toml 里读出已注册的 cc 模型名。"""
+
+        try:
+            settings = settings_from_config(config)
+            path, _ = detect_model_config(settings=settings, plugin_dir=Path(__file__).parent)
+        except Exception:  # noqa: BLE001 - 状态展示失败不应影响命令
+            return []
+        if path is None:
+            return []
+        try:
+            parsed = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            return []
+        section = getattr(config, "commandcode", None)
+        provider_name = str(getattr(section, "provider_name", CC_PROVIDER_NAME) or CC_PROVIDER_NAME)
+        names: list[str] = []
+        for item in parsed.get("models", []):
+            if str(item.get("api_provider") or "") != provider_name:
+                continue
+            name = str(item.get("name") or "")
+            if name:
+                names.append(name)
+        return names
+
+    # ─── LLM Provider 入口 ──────────────────────────────────────────────
 
     def build_status_text(self) -> str:
         """构造状态文本（同时供命令与单测使用）。"""
@@ -518,8 +661,27 @@ class DeepEtherProxyPlugin(MaiBotPlugin):
             gate_limit=gate_limit,
             gate_rejected=self._provider.gate_rejected if self._provider is not None else 0,
             pacing=self._provider.pacing_snapshot if self._provider is not None else None,
-            provision=self._provision.summary() if self._provision is not None else None,
+            cc=self._cc_summary(),
         )
+
+    def _cc_summary(self) -> dict[str, Any] | None:
+        """返回 CommandCode 的一行摘要（预算 + 熔断）；未启用时返回 None。"""
+
+        provider = self._cc_provider
+        if provider is None:
+            return None
+        section = getattr(self.config, "commandcode", None)
+        api_key = str(getattr(section, "api_key", "") or "").strip()
+        if not api_key and not os.environ.get("COMMAND_CODE_API_KEY", "").strip():
+            return None
+        try:
+            snapshot = dict(provider.budget_snapshot or {})
+        except Exception:  # noqa: BLE001 - 状态展示失败不应影响命令
+            return None
+        if not snapshot:
+            return None
+        snapshot["circuit_state"] = provider.circuit_state
+        return snapshot
 
     # ─── LLM Provider 入口 ──────────────────────────────────────────────
 
@@ -547,6 +709,34 @@ class DeepEtherProxyPlugin(MaiBotPlugin):
         if provider is None:
             provider = DeepEtherProvider(self)
             self._provider = provider
+        return await provider.dispatch(operation, request)
+
+    @LLMProvider(
+        CLIENT_TYPE_COMMANDCODE,
+        name="CommandCode（Go 套餐）",
+        description="CommandCode Go 订阅反代 Provider（/alpha/generate）",
+        version=PROVIDER_VERSION,
+    )
+    async def handle_commandcode_llm_request(
+        self, operation: str, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        """处理 CommandCode 通道的 LLM 调用。
+
+        Args:
+            operation: `response` / `embedding` / `audio_transcription`。
+            request: Host 序列化后的请求字典。
+
+        Returns:
+            dict[str, Any]: 带 `output_items` 的响应字典（支持工具调用）。
+
+        Raises:
+            DeepEtherError: 无法给出结果时抛出带中文说明的异常。
+        """
+
+        provider = self._cc_provider
+        if provider is None:
+            provider = CommandCodeProvider(self)
+            self._cc_provider = provider
         return await provider.dispatch(operation, request)
 
 

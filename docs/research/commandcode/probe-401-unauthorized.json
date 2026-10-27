@@ -1,0 +1,1 @@
+{"success":false,"error":{"code":"UNAUTHORIZED","status":401,"message":"Invalid 'Authorization' header or token.","docs":"https://commandcode.ai/docs/reference/errors/unauthorized"}}

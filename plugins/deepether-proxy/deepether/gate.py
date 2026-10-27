@@ -24,16 +24,18 @@ STATE_HALF_OPEN: Final[str] = "half_open"
 class ConcurrencyGate:
     """限制并发数量的异步闸门。"""
 
-    def __init__(self, max_concurrency: int, queue_wait_sec: float) -> None:
+    def __init__(self, max_concurrency: int, queue_wait_sec: float, label: str = "网页版") -> None:
         """初始化闸门。
 
         Args:
             max_concurrency: 同时进行上限。
             queue_wait_sec: 排队等待上限（秒），超时即失败。
+            label: 错误文案里的通道名（`网页版` / `CommandCode`）。
         """
 
         self._limit = max(1, int(max_concurrency))
         self._queue_wait_sec = max(0.0, float(queue_wait_sec))
+        self._label = label or "通道"
         self._semaphore = asyncio.Semaphore(self._limit)
         self._in_flight = 0
         self._rejected = 0
@@ -56,16 +58,19 @@ class ConcurrencyGate:
 
         return self._limit
 
-    def reconfigure(self, max_concurrency: int, queue_wait_sec: float) -> None:
+    def reconfigure(self, max_concurrency: int, queue_wait_sec: float, label: str | None = None) -> None:
         """按新配置重建闸门（配置热更新时调用）。
 
         Args:
             max_concurrency: 新的并发上限。
             queue_wait_sec: 新的排队等待上限。
+            label: 新的通道名；为空时保持原值。
         """
 
         self._limit = max(1, int(max_concurrency))
         self._queue_wait_sec = max(0.0, float(queue_wait_sec))
+        if label:
+            self._label = label
         self._semaphore = asyncio.Semaphore(self._limit)
 
     async def acquire(self) -> None:
@@ -81,7 +86,7 @@ class ConcurrencyGate:
             self._rejected += 1
             raise DeepEtherError(
                 ErrorCode.CONCURRENCY_REJECTED,
-                f"网页版并发已满（{self._limit}），排队超过 {self._queue_wait_sec:.0f}s",
+                f"{self._label}并发已满（{self._limit}），排队超过 {self._queue_wait_sec:.0f}s",
                 retryable=True,
             ) from exc
         self._in_flight += 1

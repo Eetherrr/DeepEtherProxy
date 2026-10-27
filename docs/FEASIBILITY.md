@@ -1,8 +1,11 @@
 # DeepEtherProxy 可行性分析报告
 
+> 状态：**总纲**（部分章节已被后续版本取代，正文有标注）　最后更新：2026-10-27
 > 项目：把 DeepSeek 网页版反代为 MaiBot 的模型能力（MaiBot 第三方插件）
 > 文档版本：**v0.6**（v0.2 起并入产品决策：优先网页版 / 失败交 MaiBot 模型调度处理 / 自动获取凭证 / 个人使用 / 长期稳定）
 > 修订：v0.6（2026-10-22）——插件 0.3.0 起移除了插件内 fallback（§6.7 标记为已被取代），部署前提见 [plugins/deepether-proxy/README.md](../plugins/deepether-proxy/README.md)；0.3.1 起自动注册不再创建 `deepether-planner`（planner 需要工具调用，网页版做不到）
+> 0.4.0（2026-10-27）：新增 **CommandCode（Go 套餐）** 第二个 Provider，支持工具调用/视觉；本文只描述网页版通道，
+> CommandCode 的设计与实测见 [COMMANDCODE-FEASIBILITY.md](research/COMMANDCODE-FEASIBILITY.md)、[P1-RESULTS.md](research/commandcode/P1-RESULTS.md)
 > 日期：2026-10-20
 > 核实基线：MaiBot **1.3.11**、**maibot-plugin-sdk 2.12.0**（本机源码实测，非仅依据文档）
 > 工作区：`E:\Dev\EtherTool\DeepEtherProxy`
@@ -584,7 +587,7 @@ def _build_tool_invocation(self, tool_call, latest_thought) -> ToolInvocation:
 **这个路由能省下大约"除 planner 与多模态外"的全部 token**。按 §4.4.2 的假设，若 planner 占 40%，则约省 60%——**这已经是相当可观的收益，且不需要冒 `planner` 瘫痪的风险**。
 
 > 逐任务的适配性（谁需要工具/视觉、谁要求 JSON、谁在等待路径上）已按 1.3.11 源码重新核查并整理成
-> [docs/TASK-SUITABILITY.md](TASK-SUITABILITY.md)，接任务前以那份结论为准。
+> [docs/design/TASK-SUITABILITY.md](design/TASK-SUITABILITY.md)，接任务前以那份结论为准。
 
 > 换句话说：**先拿到 60% 的确定收益，再去赌 P3 那 95% 准确率**，比一上来就全量替换理性得多。
 
@@ -624,7 +627,7 @@ hard_timeout = 240.0
 > ⚠️ **`selection_strategy` 必须显式设成 `sequential`。** MaiBot 默认值不是 `sequential`
 > （1.3.11 里是 `balance`；本节初稿记为 `random`，结论不变）：不设成 `sequential` 就无法保证
 > 先走网页版，日志里也没有任何切模型痕迹（R12）。
-> 这也是 P2 演练实测发现的坑（见 `docs/P2-ACCEPTANCE.md`）。
+> 这也是 P2 演练实测发现的坑（见 `docs/records/P2-ACCEPTANCE.md`）。
 
 → ~~**§6.7 的插件内降级在这个场景下是第二层保险，可以放到 P2 再做。**~~
 > **0.3.0 修订**：插件内降级已移除（§6.7 整节被取代）。插件就是一个普通 Provider，
@@ -1076,7 +1079,7 @@ WebUI 首次启动会在日志里打印登录 Token（`[WebUI应用] 🔑 WebUI 
 | **P0.5 凭证** | 打开网页点一下即自动就位；定时探活；失效时中文提示 + 一键重授权（§6.5） | 回环凭证服务、书签小工具、`/deepehter-status` 雏形 | 1–2 天 |
 | **P1 打通** | **先只接 `replyer`** 跑通（§4.5）：`context_items` → prompt → 网页版 → 纯文本；用 `model_list` 主备兜底。跑稳后再扩 `utils` / `mid_memory` | adapter_in/out、web_client、pow 封装 | 2–3 天 |
 | **P2 稳定** | 并发闸门、排队预估、熔断、**自动降级官方 API**、启动/定时自检、降级可见（§6.6） | openai_fallback、circuit breaker、status 命令 | 2–3 天 |
-| **P2.5 反封禁** | 让网页版通道"看起来像人在用"：串行 + 抖动间隔 + 三级配额 + 风控信号分类 + 会话复用 + 指纹自洽 + 节奏状态落盘（§7.2、`docs/ANTIBAN.md`） | `antiban.py`（PacingController / classify_failure）、`[antiban]` 配置节、状态命令新增段落 | 1–2 天（**上线前必做**） |
+| **P2.5 反封禁** | 让网页版通道"看起来像人在用"：串行 + 抖动间隔 + 三级配额 + 风控信号分类 + 会话复用 + 指纹自洽 + 节奏状态落盘（§7.2、`docs/design/ANTIBAN.md`） | `antiban.py`（PacingController / classify_failure）、`[antiban]` 配置节、状态命令新增段落 | 1–2 天（**上线前必做**） |
 | **P2.6 自动注册** | 插件加载时自动把 Provider 与预设模型写进 Host 的 `config/model_config.toml`，并把 `replyer`/`utils` 接到 sequential 主备列表首位；Host 文件监视热重载、无需重启（§7.3）。0.3.1 起只注册两个模型（不再创建 `deepether-planner`） | `deepether/provision.py`、`[provision]` 配置节、`/deepether-setup` 命令、17 条单测 | 0.5 天 |
 | **P3 工具 shim** | 提示词级 tool_calls 模拟：`tool_options` 注入 → 解析 JSON → `FunctionCallItem` 交 Host 执行（边界见 §4.3） | tool_emu + 准确率回归集 | 3–5 天（不确定性最高） |
 | **P4 收尾** | i18n、README、"上游改版排查 5 步"、发布准备 | 文档 + 测试报告 | 1–2 天 |
@@ -1116,25 +1119,28 @@ P2.6 让插件自己写：
 ### 7.2 P2.5 反封禁：为什么它必须排在 P3 之前
 
 P0~P2 解决"能不能跑"，但跑起来之后最先杀死这套方案的不是 bug，而是**上游封号**——本项目实测已因行为特征被封 3 天。
-封禁不来自单次请求内容，而来自节奏、会话模式、失败率、TLS/HTTP 指纹这几层（分层模型见 `docs/ANTIBAN.md` §1）。
+封禁不来自单次请求内容，而来自节奏、会话模式、失败率、TLS/HTTP 指纹这几层（分层模型见 `docs/design/ANTIBAN.md` §1）。
 
 P2.5 的交付物（0.2.3 已全部落地）：
 
 | 措施 | 实现 | 默认值 |
 |---|---|---|
 | 同 token 串行 + 抖动间隔 | `antiban.PacingController.acquire` | 串行、8~20s、抖动 0.25 |
-| 分/时/日三级配额 | 同上（滑动窗口） | 3/min、30/h、200/day |
+| 分/时/日三级配额 | 同上（滑动窗口） | 3/min、45/h、400/day（0.3.2 扩容） |
+| 自适应日预算（AIMD） | `antiban.PacingController` 的 `budget_scale` | 风控 ×0.6 回撤、连续成功 100 次 +0.1 回补 |
+| 夜间节律 | `antiban.quiet_hours` | 01:00-07:00 分/时 ×0.25 |
+| 按模型配额 + 额度保留 | `model_daily_limits` / `reserve_daily_budget` | 可选；默认保留 60 次给 replyer |
 | 风控信号分类（技术性错误不算风控） | `antiban.classify_failure` → `BanKind` | PoW/凭证/5xx → 不冷却 |
 | 长冷却与自适应退避 | 429→15min，疑似封号→6h；连续 3 次升级、成功折半 | 上限 ×8 |
-| 会话复用 | `web_client.acquire_session(reuse_limit)` | 8 次 |
+| 会话复用 | `web_client.acquire_session(reuse_limit)` | 20 次（0.3.2 从 8 上调） |
 | 指纹自洽 + 可选 h2 | `constants.BROWSER_XHR_HEADERS`、`_HTTP2_AVAILABLE` | 不伪造私有头 |
 | 状态落盘（重启不加刑） | `runtime_dir/antiban_state.json` + `cooldown_until_wall` | 原子写 |
 | 失败不拖累对话 | `acquire` 抛 `PACING_COOLDOWN/QUOTA` → 本次调用直接失败（0.3.0 起插件不内置兜底调用，由 MaiBot 的模型调度处理） | 对话不断线 |
 
-设计取舍与"明确不做的手段"（代理池、随机 UA、伪造 cookie、多实例共用 token、PoW 抢跑）见 `docs/ANTIBAN.md` §5。
+设计取舍与"明确不做的手段"（代理池、随机 UA、伪造 cookie、多实例共用 token、PoW 抢跑）见 `docs/design/ANTIBAN.md` §5。
 
 > P2 验收结论（2026-10-21）：可用性 / 不静默 / 不雪崩 / 可观测 四项已实测通过；
-> 凭证项与 replyer 专项属于「跑一周」类指标，当前数据见 [P2-ACCEPTANCE.md](P2-ACCEPTANCE.md)。
+> 凭证项与 replyer 专项属于「跑一周」类指标，当前数据见 [P2-ACCEPTANCE.md](records/P2-ACCEPTANCE.md)。
 
 **关键路径风险在 P3**：提示词级工具调用成功率取决于模型配合度。
 
@@ -1261,7 +1267,7 @@ New-Item -ItemType Junction -Path "E:\Dev\NapCat\NapCatData\apps\maibot\73fc1ca9
 >
 > **2026-10-21 已按此表演练**：断网/改坏 token 降级、并发 20 闸门两条主线全绿，
 > 演练暴露的 3 个问题（HTTP 200 下的鉴权失败误分类、探活漏判、排队拒绝误开熔断）已修复，
-> 详见 **[P2-ACCEPTANCE.md](P2-ACCEPTANCE.md)**。
+> 详见 **[P2-ACCEPTANCE.md](records/P2-ACCEPTANCE.md)**。
 
 ---
 

@@ -41,6 +41,42 @@ from .pow import solve_pow
 from .sse import SseAccumulator, StreamSnapshot
 
 _BODY_SNIPPET_LIMIT: Final[int] = 400
+
+#: 403 响应体里出现这些词，才认为真的是鉴权失败（否则按软限流处理）。
+_AUTH_MARKERS: Final[tuple[str, ...]] = (
+    "token",
+    "authorization",
+    "unauthorized",
+    "login",
+    "登录",
+    "凭证",
+    "40003",
+)
+
+#: 业务错误文案里出现这些词，按"限流"而不是"协议漂移"处理。
+_RATE_MARKERS: Final[tuple[str, ...]] = (
+    "频繁",
+    "frequency",
+    "too many",
+    "slow down",
+    "稍后重试",
+    "rate limit",
+    "请稍候",
+)
+
+
+def _looks_like_auth_error(body: str) -> bool:
+    """判断 403 响应体是否像"鉴权失败"而不是"软限流/封禁"。"""
+
+    text = (body or "").lower()
+    return any(marker in text for marker in _AUTH_MARKERS)
+
+
+def _looks_like_rate_limit(message: str) -> bool:
+    """判断业务错误文案是否属于限流/频繁类。"""
+
+    text = (message or "").lower()
+    return any(marker in text for marker in _RATE_MARKERS)
 _CONNECT_TIMEOUT_SEC: Final[float] = 10.0
 
 try:  # 可选依赖：装了 h2 才能用 HTTP/2（Chrome 一律 h2，直连 h1.1 是弱指纹）
@@ -83,7 +119,7 @@ class WebUpstreamClient:
         self._base_url = base_url.rstrip("/")
         self._client: httpx.AsyncClient | None = None
         # 会话复用：网页版正常用户是在同一个会话里连续追问，而"每轮都新建会话"
-        # 会留下"一天建几百个会话"的机器行为痕迹（docs/ANTIBAN.md 措施 4）。
+        # 会留下"一天建几百个会话"的机器行为痕迹（docs/design/ANTIBAN.md 措施 4）。
         self._session_id: str | None = None
         self._session_uses: int = 0
         self._session_reuse_calls: int = 8
@@ -140,7 +176,7 @@ class WebUpstreamClient:
         if not token:
             raise DeepEtherError(
                 ErrorCode.CREDENTIAL_MISSING,
-                "尚未配置网页版凭证：请在插件配置的 credential.web_token 填入 token（发送 /deepether-status 可看步骤）",
+                "尚未配置网页版凭证：请在插件配置的 credential.web_tokens 填入 token（发送 /deepether-status 可看步骤）",
             )
         return token
 
@@ -150,7 +186,7 @@ class WebUpstreamClient:
         除鉴权与来源头外，这里补齐浏览器 XHR 会带的一套指纹头
         （Accept-Language / sec-ch-ua* / sec-fetch-*，见 constants.BROWSER_XHR_HEADERS）。
         只发 Authorization + User-Agent 的请求在服务端看来就是"裸脚本"，
-        是风控最容易识别的一类特征（详见 docs/ANTIBAN.md）。
+        是风控最容易识别的一类特征（详见 docs/design/ANTIBAN.md）。
 
         Args:
             accept: Accept 头取值；读 SSE 时传 text/event-stream。
@@ -189,18 +225,31 @@ class WebUpstreamClient:
         snippet = (body_text or "")[: _BODY_SNIPPET_LIMIT]
         if status in (401, 403):
             # 401 基本就是 token 过期；403 还可能是"账号被风控封禁"，两者处置完全不同：
-            # 前者重新取 token 即可，后者继续重试只会加长封禁（docs/ANTIBAN.md 措施 5）。
+            # 前者重新取 token 即可，后者继续重试只会加长封禁（docs/design/ANTIBAN.md 措施 5）。
             if status == 403 and classify_failure(status=status, body=snippet) == BanKind.BANNED:
                 raise DeepEtherError(
                     ErrorCode.ACCOUNT_RISK,
                     "上游返回账号级封禁/风控提示，请停止自动重试并在浏览器里确认账号状态",
                     detail=f"{stage} HTTP {status}: {snippet}",
+                    status=status,
+                )
+            if status == 403 and not _looks_like_auth_error(snippet):
+                # 既没有封禁文案、也不像鉴权失败的 403：按"软限流"处理。
+                # 旧版一律当成凭证失效 → 让用户去重新授权、而且完全没有退避，
+                # 结果就是"授权完继续撞"。带上 status 让 antiban 能识别成限流。
+                raise DeepEtherError(
+                    ErrorCode.UPSTREAM_HTTP,
+                    "上游返回 403 但未给出封禁文案，按限流处理：请降低调用频率",
+                    detail=f"{stage} HTTP {status}: {snippet}",
+                    retryable=True,
+                    status=status,
                 )
             self._on_credential_invalid(f"上游 {stage} 返回 {status}")
             raise DeepEtherError(
                 ErrorCode.CREDENTIAL_INVALID,
-                "网页版 token 已失效：请从浏览器控制台重新获取后更新插件配置的 credential.web_token",
+                "网页版 token 已失效：请从浏览器控制台重新获取后更新插件配置的 credential.web_tokens",
                 detail=f"{stage} HTTP {status}: {snippet}",
+                status=status,
             )
         if status == 429:
             raise DeepEtherError(
@@ -208,6 +257,7 @@ class WebUpstreamClient:
                 "网页版接口返回 429，触发风控或频率限制，请稍后重试",
                 detail=snippet,
                 retryable=True,
+                status=status,
             )
         if "40301" in snippet or "INVALID_POW" in snippet.upper():
             raise DeepEtherError(
@@ -221,6 +271,7 @@ class WebUpstreamClient:
             f"上游 {stage} 返回 HTTP {status}",
             detail=snippet,
             retryable=status >= 500,
+            status=status,
         )
 
     @staticmethod
@@ -266,8 +317,17 @@ class WebUpstreamClient:
             self._on_credential_invalid(f"上游 {stage} 返回 {code} {message}".strip())
             raise DeepEtherError(
                 ErrorCode.CREDENTIAL_INVALID,
-                "网页版 token 已失效：请从浏览器控制台重新获取后更新插件配置的 credential.web_token",
+                "网页版 token 已失效：请从浏览器控制台重新获取后更新插件配置的 credential.web_tokens",
                 detail=f"{stage} code={code} {message}: {detail}",
+            )
+        if _looks_like_rate_limit(message):
+            # HTTP 200 + code≠0 的"请求过于频繁/稍后重试"：这是限流，不是协议漂移，
+            # 归成 upstream_http 才能让 antiban 识别并退避。
+            raise DeepEtherError(
+                ErrorCode.UPSTREAM_HTTP,
+                f"上游返回业务限流提示（code={code}）：{message or '无说明'}",
+                detail=detail,
+                retryable=True,
             )
         raise DeepEtherError(
             ErrorCode.PROTOCOL_ERROR,
@@ -367,7 +427,7 @@ class WebUpstreamClient:
         """返回可用的会话 id，优先复用已有会话。
 
         网页版真实用户是在同一个会话里连续追问；每调用一次就新建一个会话属于
-        很显眼的机器行为（见 docs/ANTIBAN.md 措施 4）。所以这里复用最近一次会话，
+        很显眼的机器行为（见 docs/design/ANTIBAN.md 措施 4）。所以这里复用最近一次会话，
         累计使用次数超过 reuse_limit 或上游报错后才换新会话。
 
         Args:

@@ -1,6 +1,7 @@
 # P2 稳定性验收演练报告
 
-> **历史记录**：本文记录的「插件内降级」演练是 **0.2.x** 的行为；0.3.0（2026-10-22）起插件移除了插件内 fallback 逻辑，失败与其它模型一致由 MaiBot 的模型调度处理（部署前提见 [plugins/deepether-proxy/README.md](../plugins/deepether-proxy/README.md) 的「部署前提」小节）。
+> 状态：**归档**（0.2.x 行为的历史验收记录，结论仍然有效）　最后更新：2026-10-21
+> **历史记录**：本文记录的「插件内降级」演练是 **0.2.x** 的行为；0.3.0（2026-10-22）起插件移除了插件内 fallback 逻辑，失败与其它模型一致由 MaiBot 的模型调度处理（部署前提见 [plugins/deepether-proxy/README.md](../../plugins/deepether-proxy/README.md) 的「部署前提」小节）。
 
 > 日期：**2026-10-21**　版本：**0.2.1**　执行：Lead + harness-dev（演练 B 脚本）+ p2-auditor（只读审计）
 > 环境：MaiBot **1.3.11** / maibot-plugin-sdk **2.12.0** / Python 3.12

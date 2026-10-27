@@ -1,0 +1,30 @@
+{"type": "start"}
+{"type": "start-step", "request": {}, "warnings": []}
+{"type": "reasoning-start", "id": "reasoning-0"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": "The"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " user wants"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " me to reply with exactly D"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": "ONE."}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " But the"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " system"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " says \"Do not answer"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " with plain text\" from"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " before—"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": "that was the"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " earlier instruction. Now they want"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " me to reply with"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " exactly D"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": "ONE. I should use the"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " reply tool with"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " text \"DONE\".\n\nWait"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": ", \""}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": "reply"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " with exactly DONE and nothing"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " else\" — I"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " should call the reply tool with"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " text \"DONE\". Let"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " me do that."}
+{"type": "reasoning-end", "id": "reasoning-0"}
+{"type": "finish-step", "finishReason": "length", "rawFinishReason": "length", "usage": {"inputTokens": 385, "inputTokenDetails": {"noCacheTokens": 129, "cacheReadTokens": 256}, "outputTokens": 96, "outputTokenDetails": {"textTokens": 11, "reasoningTokens": 85}, "totalTokens": 481, "raw": {"prompt_tokens": 385, "completion_tokens": 96, "total_tokens": 481, "prompt_tokens_details": {"cached_tokens": 256}, "completion_tokens_details": {"reasoning_tokens": 85, "accepted_prediction_tokens": 0, "rejected_prediction_tokens": 0}}, "reasoningTokens": 85, "cachedInputTokens": 256}, "providerMetadata": {"novita": {"acceptedPredictionTokens": 0, "rejectedPredictionTokens": 0}}, "response": {"id": "1f861bb1c92a37978ac1ca99876cb993", "timestamp": "2026-10-25T10:31:15.000Z", "modelId": "deepseek/deepseek-v4.1-flash", "headers": {"access-control-allow-origin": "*", "cache-control": "no-cache", "cf-cache-status": "DYNAMIC", "cf-ray": "a5008cea3cc7feac-AMS", "connection": "close", "content-type": "text/event-stream", "date": "Sun, 25 Oct 2026 10:31:15 GMT", "server": "cloudflare", "set-cookie": "__cf_bm=_UUE8mju0DEmq2omBke_v5lvNMQsHTEObua_ztZRjIU-1792924274.2753215-1.0.1.1-HLlL5GI9MYc0DUJg8XerA9tPqAAmHfvTvk7HKoIIBadfejLJxV.s8sMXM72_gVKZHRZvOUEglWaOb9OOXTCIWQPT79jARCfQD_2VjA_3nuRsruXUv9iduoLw1xcCLkDs; HttpOnly; SameSite=None; Secure; Path=/; Domain=novita.ai; Expires=Sun, 25 Oct 2026 11:01:15 GMT", "transfer-encoding": "chunked", "x-fusion-transport": "embedded", "x-ratelimit-limit-requests": "20000", "x-ratelimit-limit-tokens": "2000000000", "x-ratelimit-remaining-requests": "19805", "x-ratelimit-remaining-tokens": "1933949500", "x-ratelimit-reset-requests": "585ms", "x-ratelimit-reset-tokens": "2s", "x-request-id": "", "x-trace-id": "1f861bb1c92a37978ac1ca99876cb993"}}}
+{"type": "finish", "finishReason": "length", "rawFinishReason": "length", "totalUsage": {"inputTokens": 385, "inputTokenDetails": {"noCacheTokens": 129, "cacheReadTokens": 256}, "outputTokens": 96, "outputTokenDetails": {"textTokens": 11, "reasoningTokens": 85}, "totalTokens": 481, "reasoningTokens": 85, "cachedInputTokens": 256}}
+{"type": "provider-metadata", "providerMetadata": {"novita": {"acceptedPredictionTokens": 0, "rejectedPredictionTokens": 0}}}

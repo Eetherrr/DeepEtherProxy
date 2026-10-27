@@ -1,0 +1,23 @@
+{"type": "start"}
+{"type": "start-step", "request": {}, "warnings": []}
+{"type": "reasoning-start", "id": "reasoning-0"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": "The"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " user wants me to call the"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": " reply tool with text \"OK"}
+{"type": "reasoning-delta", "id": "reasoning-0", "text": "\". I should do that."}
+{"type": "reasoning-end", "id": "reasoning-0"}
+{"type": "tool-input-start", "id": "call_00_ra8l7v9mn5ueviphnpoobxdi", "toolName": "reply", "dynamic": false}
+{"type": "tool-input-delta", "id": "call_00_ra8l7v9mn5ueviphnpoobxdi", "delta": "{"}
+{"type": "tool-input-delta", "id": "call_00_ra8l7v9mn5ueviphnpoobxdi", "delta": "\""}
+{"type": "tool-input-delta", "id": "call_00_ra8l7v9mn5ueviphnpoobxdi", "delta": "text"}
+{"type": "tool-input-delta", "id": "call_00_ra8l7v9mn5ueviphnpoobxdi", "delta": "\""}
+{"type": "tool-input-delta", "id": "call_00_ra8l7v9mn5ueviphnpoobxdi", "delta": ": "}
+{"type": "tool-input-delta", "id": "call_00_ra8l7v9mn5ueviphnpoobxdi", "delta": "\""}
+{"type": "tool-input-delta", "id": "call_00_ra8l7v9mn5ueviphnpoobxdi", "delta": "OK"}
+{"type": "tool-input-delta", "id": "call_00_ra8l7v9mn5ueviphnpoobxdi", "delta": "\""}
+{"type": "tool-input-delta", "id": "call_00_ra8l7v9mn5ueviphnpoobxdi", "delta": "}"}
+{"type": "tool-input-end", "id": "call_00_ra8l7v9mn5ueviphnpoobxdi"}
+{"type": "tool-call", "toolCallId": "call_00_ra8l7v9mn5ueviphnpoobxdi", "toolName": "reply", "input": {"text": "OK"}}
+{"type": "finish-step", "finishReason": "tool-calls", "rawFinishReason": "tool_calls", "usage": {"inputTokens": 306, "inputTokenDetails": {"noCacheTokens": 50, "cacheReadTokens": 256}, "outputTokens": 56, "outputTokenDetails": {"textTokens": 37, "reasoningTokens": 19}, "totalTokens": 362, "raw": {"prompt_tokens": 306, "completion_tokens": 56, "total_tokens": 362, "prompt_tokens_details": {"cached_tokens": 256}, "completion_tokens_details": {"reasoning_tokens": 19, "accepted_prediction_tokens": 0, "rejected_prediction_tokens": 0}}, "reasoningTokens": 19, "cachedInputTokens": 256}, "providerMetadata": {"novita": {"acceptedPredictionTokens": 0, "rejectedPredictionTokens": 0}}, "response": {"id": "6a8af8fc817e9bb6e52d15a4d4b61a0f", "timestamp": "2026-10-25T10:31:12.000Z", "modelId": "deepseek/deepseek-v4.1-flash", "headers": {"access-control-allow-origin": "*", "cache-control": "no-cache", "cf-cache-status": "DYNAMIC", "cf-ray": "a5008cd84950a008-AMS", "connection": "close", "content-type": "text/event-stream", "date": "Sun, 25 Oct 2026 10:31:12 GMT", "server": "cloudflare", "set-cookie": "__cf_bm=PQcnVaRo_6L3kVB6HUPZCKfannHtmdyE6.xkRIdU320-1792924271.4098227-1.0.1.1-UCvxqATKPbDGta7pVjhdk6rlGT11YrFu4PLwgl98Uw6bQ96zj4b3JcDN3OycnElffiB7dlfzZs.g7fjkd5MvUWcD6wwXFn7V1MBbKCiW0SYDwk1LzfprZhXRUVDn7l.z; HttpOnly; SameSite=None; Secure; Path=/; Domain=novita.ai; Expires=Sun, 25 Oct 2026 11:01:12 GMT", "transfer-encoding": "chunked", "via": "1.1 Caddy", "x-fusion-transport": "embedded", "x-ratelimit-limit-requests": "20000", "x-ratelimit-limit-tokens": "2000000000", "x-ratelimit-remaining-requests": "19835", "x-ratelimit-remaining-tokens": "1938713096", "x-ratelimit-reset-requests": "495ms", "x-ratelimit-reset-tokens": "2s", "x-request-id": "", "x-trace-id": "6a8af8fc817e9bb6e52d15a4d4b61a0f"}}}
+{"type": "finish", "finishReason": "tool-calls", "rawFinishReason": "tool_calls", "totalUsage": {"inputTokens": 306, "inputTokenDetails": {"noCacheTokens": 50, "cacheReadTokens": 256}, "outputTokens": 56, "outputTokenDetails": {"textTokens": 37, "reasoningTokens": 19}, "totalTokens": 362, "reasoningTokens": 19, "cachedInputTokens": 256}}
+{"type": "provider-metadata", "providerMetadata": {"novita": {"acceptedPredictionTokens": 0, "rejectedPredictionTokens": 0}}}

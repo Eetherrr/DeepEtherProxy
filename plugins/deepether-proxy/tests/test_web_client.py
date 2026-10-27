@@ -135,3 +135,59 @@ def test_code_zero_envelope_passes():
     asyncio.run(client.close())
     assert session_id == "sess-ok"
     assert not reasons
+
+def test_403_without_ban_text_is_treated_as_rate_limit():
+    """没有封禁文案、也不像鉴权的 403：按软限流处理（退避），而不是让用户去重授权。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text="Forbidden")
+
+    client, reasons = _client_with_transport(handler)
+    with pytest.raises(DeepEtherError) as excinfo:
+        asyncio.run(client.create_session())
+    asyncio.run(client.close())
+    error = excinfo.value
+    assert error.code == "upstream_http"
+    assert error.retryable is True
+    assert error.status == 403
+    assert not reasons, "软限流不应把凭证标记成失效"
+
+
+def test_403_with_banned_text_is_account_risk():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text="Your account has been suspended")
+
+    client, _reasons = _client_with_transport(handler)
+    with pytest.raises(DeepEtherError) as excinfo:
+        asyncio.run(client.create_session())
+    asyncio.run(client.close())
+    assert excinfo.value.code == "account_risk"
+    assert excinfo.value.status == 403
+
+
+def test_401_marks_credential_invalid_with_status():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, text="Unauthorized")
+
+    client, reasons = _client_with_transport(handler)
+    with pytest.raises(DeepEtherError) as excinfo:
+        asyncio.run(client.create_session())
+    asyncio.run(client.close())
+    assert excinfo.value.code == "credential_invalid"
+    assert excinfo.value.status == 401
+    assert reasons
+
+
+def test_http200_business_rate_limit_is_upstream_http():
+    """HTTP 200 + code≠0 的"请求过于频繁"应归成可重试的上游错误，而不是协议异常。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": 42900, "msg": "请求过于频繁，请稍后重试", "data": None})
+
+    client, reasons = _client_with_transport(handler)
+    with pytest.raises(DeepEtherError) as excinfo:
+        asyncio.run(client.create_session())
+    asyncio.run(client.close())
+    assert excinfo.value.code == "upstream_http"
+    assert excinfo.value.retryable is True
+    assert not reasons

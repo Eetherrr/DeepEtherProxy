@@ -16,23 +16,26 @@ LLM Provider——失败与其它模型失败没有区别，由 MaiBot 的模型
 from pathlib import Path
 from typing import Any
 
+import hashlib
 import json
 import time
 
 from maibot_sdk import LLMProviderBase
 
 from .adapter_in import RenderedContext, build_messages, style_suffix
-from .antiban import PacingConfig, PacingController, classify_failure
+from .antiban import PacingConfig, PacingController, classify_failure, parse_model_limits
 from .adapter_out import build_response
 from .config import DeepEtherProxyConfig
 from .errors import DeepEtherError, ErrorCode
 from .gate import CircuitBreaker, ConcurrencyGate
+from .provision import detect_model_config, read_model_providers, read_task_models, settings_from_config
 from .upstream.web_client import WebUpstreamClient
 
 _DUMP_REQUEST_FILE_TEMPLATE: str = "last_request_{model}.json"
 _DEFAULT_OUTER_TIMEOUT_SEC: float = 120.0
 _DEFAULT_SESSION_REUSE_CALLS: int = 8
 _PACING_STATE_FILE: str = "antiban_state.json"
+_MAX_ACCOUNT_ATTEMPTS: int = 3
 
 
 def _antiban_section(config: Any) -> Any:
@@ -51,6 +54,12 @@ def _antiban_section(config: Any) -> Any:
     return getattr(config, "antiban", None)
 
 
+def _split_csv(spec: Any) -> tuple[str, ...]:
+    """把逗号分隔的配置值拆成元组（去空白、丢空项）。"""
+
+    return tuple(item.strip() for item in str(spec or "").split(",") if item.strip())
+
+
 class DeepEtherProvider(LLMProviderBase):
     """DeepEther Proxy 的 Provider 编排层。
 
@@ -67,13 +76,19 @@ class DeepEtherProvider(LLMProviderBase):
         """
 
         self._plugin = plugin
-        self._client: WebUpstreamClient | None = None
+        self._clients: dict[str, WebUpstreamClient] = {}
         self._gate: ConcurrencyGate | None = None
         self._gate_signature: tuple[int, float] | None = None
-        self._circuit: CircuitBreaker | None = None
+        self._circuits: dict[str, CircuitBreaker] = {}
         self._circuit_signature: tuple[int, float] | None = None
-        self._pacing: PacingController | None = None
+        self._pacings: dict[str, PacingController] = {}
         self._pacing_config: PacingConfig | None = None
+        #: 每个账号最近一次成功使用的时间（LRU 轮换用）
+        self._last_used: dict[str, float] = {}
+        #: replyer 让位目标缓存：(单调时间, [(模型, 服务商)], {模型: 服务商})
+        self._models_cache: tuple[float, list[tuple[str, str]], dict[str, str]] | None = None
+        #: 上一次让位原因（用于状态跃迁时只打一条日志）
+        self._last_yield_reason: str = ""
 
     # ─── 基础设施 ───────────────────────────────────────────────────────
 
@@ -102,44 +117,82 @@ class DeepEtherProvider(LLMProviderBase):
         except Exception:  # noqa: BLE001
             return None
 
+    def _configured_tokens(self) -> list[str]:
+        """返回可用的网页版 token 列表：配置数组优先，其次书签落盘的单条（去重、保序）。"""
+
+        raw = list(getattr(self._config.credential, "web_tokens", []) or [])
+        tokens = [str(item).strip() for item in raw if str(item).strip()]
+        if not tokens:
+            store = getattr(self._plugin, "credential_store", None)
+            record = getattr(store, "record", None) if store is not None else None
+            legacy = str(getattr(record, "token", "") or "").strip()
+            if legacy:
+                tokens = [legacy]
+        unique: list[str] = []
+        seen: set[str] = set()
+        for token in tokens:
+            if token not in seen:
+                seen.add(token)
+                unique.append(token)
+        return unique
+
     def _effective_token(self) -> str:
-        """返回生效的网页版 token：配置里的优先，其次是书签落盘的。"""
+        """返回生效的网页版 token（取列表第一条，兼容旧调用点）。"""
 
-        configured = (self._config.credential.web_token or "").strip()
-        if configured:
-            return configured
+        tokens = self._configured_tokens()
+        return tokens[0] if tokens else ""
+
+    @staticmethod
+    def _account_id(token: str) -> str:
+        """账号标识：token 的 sha1 前 8 位（日志与状态里不出现明文）。"""
+
+        return hashlib.sha1(token.encode("utf-8")).hexdigest()[:8] if token else "default"
+
+    def _mark_credential_invalid(self, reason: str, account_id: str = "") -> None:
+        """把某个账号的凭证标记为失效（多账号时只影响该账号）。"""
+
         store = getattr(self._plugin, "credential_store", None)
-        record = getattr(store, "record", None) if store is not None else None
-        return str(getattr(record, "token", "") or "")
-
-    def _mark_credential_invalid(self, reason: str) -> None:
-        """把凭证标记为失效。"""
-
-        store = getattr(self._plugin, "credential_store", None)
-        if store is not None:
+        if store is None:
+            return
+        if account_id and hasattr(store, "mark_invalid_account"):
+            store.mark_invalid_account(account_id, reason)
+        else:
             store.mark_invalid(reason)
 
-    def _ensure_client(self) -> WebUpstreamClient:
-        """按当前配置构造/复用上游客户端。"""
+    def _ensure_client(self, token: str | None = None) -> WebUpstreamClient:
+        """按账号构造/复用上游客户端（每个 token 一个，会话与连接池互不干扰）。"""
+
+        legacy = getattr(self, "_client", None)
+        if legacy is not None:
+            # 测试与外部注入用：固定返回同一个客户端
+            legacy.update_runtime_options(
+                dump_dir=self._runtime_dir() if self._config.debug.dump_response else None,
+                verbose=self._config.debug.verbose_log,
+            )
+            return legacy
 
         config = self._config
+        chosen = token if token is not None else self._effective_token()
+        account = self._account_id(chosen)
         dump_dir = self._runtime_dir() if config.debug.dump_response else None
         antiban = _antiban_section(config)
         reuse_calls = int(getattr(antiban, "session_reuse_calls", _DEFAULT_SESSION_REUSE_CALLS))
-        if self._client is None:
-            self._client = WebUpstreamClient(
-                token_provider=self._effective_token,
-                on_credential_invalid=self._mark_credential_invalid,
+        client = self._clients.get(account)
+        if client is None:
+            client = WebUpstreamClient(
+                token_provider=lambda current=chosen: current,
+                on_credential_invalid=lambda reason, acc=account: self._mark_credential_invalid(reason, acc),
                 logger=self._logger,
                 dump_dir=dump_dir,
                 verbose=config.debug.verbose_log,
             )
-        self._client.update_runtime_options(
+            self._clients[account] = client
+        client.update_runtime_options(
             dump_dir=dump_dir,
             verbose=config.debug.verbose_log,
             session_reuse_calls=reuse_calls,
         )
-        return self._client
+        return client
 
     def _ensure_resilience(self) -> None:
         """按当前配置构造/更新并发闸门与熔断器。"""
@@ -153,34 +206,48 @@ class DeepEtherProvider(LLMProviderBase):
             self._gate.reconfigure(*gate_signature)
             self._gate_signature = gate_signature
 
-        circuit_signature = (
+        self._circuit_signature = (
             config.concurrency.circuit_fail_threshold,
             float(config.concurrency.circuit_cooldown_sec),
         )
-        if self._circuit is None:
-            self._circuit = CircuitBreaker(
-                fail_threshold=config.concurrency.circuit_fail_threshold,
-                cooldown_sec=float(config.concurrency.circuit_cooldown_sec),
-            )
-            self._circuit_signature = circuit_signature
-        elif self._circuit_signature != circuit_signature:
-            self._circuit.reconfigure(*circuit_signature)
-            self._circuit_signature = circuit_signature
 
-    def _pacing_state_path(self) -> Path | None:
-        """返回节奏状态的落盘路径（未开启持久化或拿不到运行目录时返回 None）。"""
+    def _circuit_for(self, account_id: str) -> CircuitBreaker:
+        """返回某个账号的熔断器（按账号隔离，A 号失败不会连坐 B 号）。"""
+
+        legacy = getattr(self, "_circuit", None)
+        if legacy is not None:
+            return legacy
+        circuit = self._circuits.get(account_id)
+        signature = (
+            self._config.concurrency.circuit_fail_threshold,
+            float(self._config.concurrency.circuit_cooldown_sec),
+        )
+        if circuit is None:
+            circuit = CircuitBreaker(
+                fail_threshold=int(signature[0]),
+                cooldown_sec=float(signature[1]),
+            )
+            self._circuits[account_id] = circuit
+        elif self._circuit_signature != signature:
+            circuit.reconfigure(int(signature[0]), float(signature[1]))
+        return circuit
+
+    def _pacing_state_path(self, account_id: str = "") -> Path | None:
+        """返回某个账号节奏状态的落盘路径（单账号沿用旧文件名）。"""
 
         if not bool(getattr(self._config.antiban, "persist_state", True)):
             return None
         runtime_dir = self._runtime_dir()
         if runtime_dir is None:
             return None
-        return runtime_dir / _PACING_STATE_FILE
+        if len(self._configured_tokens()) <= 1 or not account_id:
+            return runtime_dir / _PACING_STATE_FILE
+        return runtime_dir / f"antiban_state_{account_id}.json"
 
-    def _load_pacing_state(self, pacing: PacingController) -> None:
-        """从磁盘恢复配额与冷却状态，避免"重启即刷新额度"。"""
+    def _load_pacing_state(self, pacing: PacingController, account_id: str = "") -> None:
+        """从磁盘恢复某个账号的配额与冷却状态。"""
 
-        path = self._pacing_state_path()
+        path = self._pacing_state_path(account_id)
         if path is None or not path.is_file():
             return
         try:
@@ -191,10 +258,10 @@ class DeepEtherProvider(LLMProviderBase):
         pacing.load_state(data)
         self._logger.info("已恢复上游节奏状态：%s", path)
 
-    def _persist_pacing(self, pacing: PacingController) -> None:
-        """把节奏状态落盘（失败只告警，不影响本次请求）。"""
+    def _persist_pacing(self, pacing: PacingController, account_id: str = "") -> None:
+        """把某个账号的节奏状态落盘（失败只告警，不影响本次请求）。"""
 
-        path = self._pacing_state_path()
+        path = self._pacing_state_path(account_id)
         if path is None:
             return
         try:
@@ -205,9 +272,11 @@ class DeepEtherProvider(LLMProviderBase):
         except OSError as exc:
             self._logger.warning("写入节奏状态失败：%s", exc)
 
-    def _ensure_pacing(self) -> PacingController:
-        """按当前配置构造/更新节奏控制器（一个插件实例一个）。"""
+    def _ensure_pacing(self, account_id: str = "") -> PacingController:
+        """按当前配置构造/更新某个账号的节奏控制器。"""
 
+        tokens = self._configured_tokens()
+        account = account_id or (self._account_id(tokens[0]) if tokens else "default")
         section = self._config.antiban
         wanted = PacingConfig(
             enabled=bool(section.enabled),
@@ -220,23 +289,149 @@ class DeepEtherProvider(LLMProviderBase):
             cooldown_on_rate_limit_sec=float(section.cooldown_on_rate_limit_sec),
             cooldown_on_ban_sec=float(section.cooldown_on_ban_sec),
             adaptive_backoff=bool(section.adaptive_backoff),
+            adaptive_budget=bool(getattr(section, "adaptive_budget", True)),
+            min_adaptive_budget=int(getattr(section, "min_adaptive_budget", 80)),
+            quiet_hours=str(getattr(section, "quiet_hours", "") or ""),
+            quiet_hours_ratio=float(getattr(section, "quiet_hours_ratio", 1.0)),
+            quota_wait_max_sec=float(getattr(section, "quota_wait_max_sec", 0.0)),
+            model_daily_limits=parse_model_limits(getattr(section, "model_daily_limits", "")),
+            reserve_daily_budget=int(getattr(section, "reserve_daily_budget", 0)),
+            reserve_models=_split_csv(getattr(section, "reserve_models", "")),
         )
-        if self._pacing is None or self._pacing_config != wanted:
-            was_running = self._pacing is not None
-            self._pacing = PacingController(wanted)
+        current = self._pacings.get(account)
+        if current is None or self._pacing_config != wanted:
+            was_running = current is not None
+            current = PacingController(wanted)
+            self._pacings[account] = current
             self._pacing_config = wanted
-            self._load_pacing_state(self._pacing)
+            self._load_pacing_state(current, account if account != "default" else "")
             if was_running:
                 self._logger.info("反封禁配置变化，节奏控制器已重建")
-        return self._pacing
+        return current
 
     @property
     def pacing_snapshot(self) -> dict[str, Any]:
         """返回节奏控制状态（供 /deepether-status 展示）。"""
 
-        if self._pacing is None:
+        tokens = self._configured_tokens()
+        if not tokens:
             return {}
-        return self._pacing.snapshot()
+        return self._ensure_pacing(self._account_id(tokens[0])).snapshot()
+
+    # ─── 额度让位（replyer hook 用；只读，不发请求、不睡眠） ───────────
+
+    _MODELS_CACHE_TTL_SEC: float = 60.0
+
+    def capacity_block_reason(self) -> str | None:
+        """返回「网页版现在没有容量」的中文原因；有容量返回 None。"""
+
+        tokens = self._configured_tokens()
+        if not tokens:
+            return None
+        reasons: list[str] = []
+        for token in tokens:
+            account = self._account_id(token)
+            try:
+                snapshot = self._ensure_pacing(account).snapshot()
+            except Exception:  # noqa: BLE001 - 判断失败不应打断回复
+                return None
+            if snapshot.get("in_cooldown"):
+                reasons.append(str(snapshot.get("cooldown_reason") or "冷却中"))
+                continue
+            limits = snapshot.get("limits") or {}
+            day_limit = int(limits.get("per_day") or 0)
+            if day_limit > 0 and int(snapshot.get("used_last_day") or 0) >= day_limit:
+                reasons.append(f"日额度已用完（{day_limit} 次）")
+                continue
+            hour_limit = int(limits.get("per_hour") or 0)
+            if hour_limit > 0 and int(snapshot.get("used_last_hour") or 0) >= hour_limit:
+                reasons.append(f"小时额度已用完（{hour_limit} 次）")
+                continue
+            circuit = self._circuits.get(account)
+            if circuit is not None and circuit.state == "open":
+                reasons.append("连续失败熔断中")
+                continue
+            return None
+        return reasons[0] if reasons else "没有可用账号"
+
+    def replyer_yield_target(self) -> str | None:
+        """额度不够时 replyer 本轮应改用的模型名；不需要让位或找不到目标时返回 None。"""
+
+        reason = self.capacity_block_reason()
+        if reason is None:
+            self._note_yield_end()
+            return None
+        target = self._resolve_fallback_model()
+        if not target:
+            return None
+        self._last_yield_reason = reason
+        return target
+
+    def invalidate_model_cache(self) -> None:
+        """配置或 model_config.toml 变化后清掉模型缓存（下一次 hook 重新读取）。"""
+
+        self._models_cache = None
+
+    def note_yield(self, target: str) -> None:
+        """记录一次让位（状态跃迁时只打一条 info，避免每轮刷屏）。"""
+
+        reason = self._last_yield_reason or "网页版没有容量"
+        marker = f"{reason}|{target}"
+        if marker == getattr(self, "_yield_marker", ""):
+            return
+        self._yield_marker = marker
+        self._logger.info("网页版暂时没有容量（%s），本轮 replyer 改走 %s", reason, target)
+
+    def _note_yield_end(self) -> None:
+        """容量恢复时清掉让位标记，下次耗尽会重新记一条。"""
+
+        if getattr(self, "_yield_marker", ""):
+            self._yield_marker = ""
+            self._last_yield_reason = ""
+            self._logger.info("网页版容量已恢复，replyer 回到网页版优先")
+
+    def _models_now(self) -> tuple[list[tuple[str, str]], dict[str, str]]:
+        """读取（并缓存 60s）replyer 的 model_list 与全体模型的服务商映射。"""
+
+        now = time.monotonic()
+        cached = self._models_cache
+        if cached is not None and now - cached[0] < self._MODELS_CACHE_TTL_SEC:
+            return cached[1], cached[2]
+        settings = settings_from_config(self._config)
+        plugin_dir = Path(__file__).resolve().parents[1]
+        path, _candidates = detect_model_config(settings=settings, plugin_dir=plugin_dir)
+        task_models = read_task_models(path, "replyer") if path is not None else []
+        providers = read_model_providers(path) if path is not None else {}
+        self._models_cache = (now, task_models, providers)
+        return task_models, providers
+
+    def next_official_model(self) -> str | None:
+        """返回 replyer 列表里第一个非本插件的模型（供 hook 让位使用）。"""
+
+        return self._resolve_fallback_model()
+
+    def first_replyer_model(self) -> tuple[str, str] | None:
+        """返回 replyer 任务 model_list 的第一个模型 (名字, 服务商)；读不到返回 None。"""
+
+        task_models, providers = self._models_now()
+        for name, provider in task_models:
+            if name in providers:
+                return name, provider
+        return None
+
+    def _resolve_fallback_model(self) -> str | None:
+        """返回 replyer 任务列表里、位于本插件之后的第一个非本插件模型。
+
+        插件不持有「兜底模型」这个概念：用哪个模型完全由你自己的 model_list 顺序决定，
+        这里只是把「本轮别用我」翻译成列表里的下一个模型名。列表里没有别的模型时返回 None。
+        """
+
+        task_models, providers = self._models_now()
+        our_provider = settings_from_config(self._config).provider_name
+        for name, provider in task_models:
+            if name in providers and provider and provider != our_provider:
+                return name
+        return None
 
     def ensure_client(self) -> WebUpstreamClient:
         """返回（必要时创建）上游客户端，供自检与定时探活使用。"""
@@ -244,18 +439,24 @@ class DeepEtherProvider(LLMProviderBase):
         return self._ensure_client()
 
     async def aclose(self) -> None:
-        """关闭上游连接池。"""
+        """关闭所有账号的上游连接池。"""
 
-        client = self._client
-        self._client = None
-        if client is not None:
+        clients = list(self._clients.values())
+        self._clients.clear()
+        for client in clients:
             await client.close()
 
     @property
     def circuit_state(self) -> str:
         """返回熔断器状态（供状态命令展示）。"""
 
-        return self._circuit.state if self._circuit is not None else "closed"
+        legacy = getattr(self, "_circuit", None)
+        if legacy is not None:
+            return legacy.state
+        tokens = self._configured_tokens()
+        if not tokens:
+            return "closed"
+        return self._circuit_for(self._account_id(tokens[0])).state
 
     @property
     def gate_rejected(self) -> int:
@@ -310,9 +511,9 @@ class DeepEtherProvider(LLMProviderBase):
     def _release_dangling_probe(self) -> None:
         """请求没有正常结束（例如被 Host 取消）时归还 half_open 探针名额。"""
 
-        circuit = self._circuit
-        if circuit is not None and circuit.probe_in_flight:
-            circuit.abort_probe()
+        for circuit in list(self._circuits.values()):
+            if circuit.probe_in_flight:
+                circuit.abort_probe()
 
     async def get_embedding(self, request: dict[str, Any]) -> dict[str, Any]:
         """网页版没有 embedding 接口。
@@ -340,6 +541,38 @@ class DeepEtherProvider(LLMProviderBase):
 
     # ─── 实际实现 ───────────────────────────────────────────────────────
 
+    def _ordered_accounts(self, tokens: list[str]) -> list[str]:
+        """按「不在熔断中 → 最久未用」排序；第一个就是本次优先使用的账号。"""
+
+        def sort_key(token: str) -> tuple[int, float]:
+            account = self._account_id(token)
+            circuit = self._circuits.get(account)
+            cooling = 1 if circuit is not None and circuit.state == "open" else 0
+            return (cooling, self._last_used.get(account, 0.0))
+
+        return sorted(tokens, key=sort_key)
+
+    def _request_model_name(self, request: dict[str, Any]) -> str:
+        """返回本次请求使用的模型名（model_config.toml 里的 name）。
+
+        反封禁的三个旋钮（按模型配额 / 保留额度 / 用量统计）都按模型名区分：
+        Host 请求里不带任务名，但带 model_info.name，正好够用。
+
+        Args:
+            request: Host 请求字典。
+
+        Returns:
+            str: 模型名；取不到时返回空串（按最低优先级处理）。
+        """
+
+        model_info = request.get("model_info")
+        if isinstance(model_info, dict):
+            for key in ("name", "model_identifier"):
+                value = model_info.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return ""
+
     async def _request_web(self, request: dict[str, Any]) -> dict[str, Any]:
         """完整链路：投影 → 闸门/熔断 → 上游；任一步失败都直接抛错。"""
 
@@ -358,63 +591,93 @@ class DeepEtherProvider(LLMProviderBase):
         budget_ms = self._outer_budget_ms(request, config)
         started = time.monotonic()
 
-        if not self._effective_token():
+        tokens = self._configured_tokens()
+        if not tokens:
             raise DeepEtherError(
                 ErrorCode.CREDENTIAL_MISSING,
-                "尚未获取网页版凭证，请在插件配置的 credential.web_token 填入网页版 token",
+                "尚未配置网页版凭证，请在插件配置的 credential.web_tokens 填入至少一个 token",
             )
 
         self._ensure_resilience()
-        assert self._gate is not None and self._circuit is not None
+        assert self._gate is not None
+        model_name = self._request_model_name(request)
 
-        if not self._circuit.allow():
-            raise DeepEtherError(
-                ErrorCode.CIRCUIT_OPEN,
-                f"网页版连续失败 {self._circuit.consecutive_failures} 次，熔断冷却中",
-            )
+        # 多账号：按「不在熔断中 + 最久未用」排序，逐个尝试；只在额度/冷却/凭证失效时换下一个账号。
+        # 其它错误不轮换（避免把一次协议问题放大成多账号连撞）。
+        last_error: DeepEtherError | None = None
+        for token in self._ordered_accounts(tokens)[: _MAX_ACCOUNT_ATTEMPTS]:
+            account = self._account_id(token)
+            circuit = self._circuit_for(account)
+            if not circuit.allow():
+                last_error = DeepEtherError(
+                    ErrorCode.CIRCUIT_OPEN,
+                    f"网页版连续失败 {circuit.consecutive_failures} 次，熔断冷却中",
+                )
+                continue
 
-        # 反封禁：同一账号串行 + 8~20s 抖动 + 三级配额。等待发生在闸门之外，
-        # 免得排队占住并发名额；预算不够就立刻失败，而不是把请求挂到超时。
-        pacing = self._ensure_pacing()
-        waited = await pacing.acquire(budget_ms=budget_ms)
-        if waited > 0:
-            self._logger.info("节奏控制：等待 %.1f 秒后调用上游", waited)
-
-        try:
-            async with self._gate:
-                snapshot = await self._call_web(config, rendered, request, budget_ms)
-        except DeepEtherError as exc:
-            # 排队超预算 = 本地容量不足，请求根本没有到上游，不能算作熔断器的
-            # "上游连续失败"（§6.6.1）。否则一次群聊突发就能把熔断打开，
-            # 让接下来 cooldown 内的所有请求绕过网页版——容量抖动被放大成故障。
-            if exc.code != ErrorCode.CONCURRENCY_REJECTED:
-                self._circuit.record_failure()
-            # 只有"上游在风控我们"才退避：PoW 过期、凭证失效、5xx 都算技术性失败。
+            pacing = self._ensure_pacing(account)
             try:
-                kind = classify_failure(code=exc.code, message=exc.message, body=exc.detail)
-            except Exception:  # noqa: BLE001 - 分类失败不应放大成请求失败
-                kind = None
-            if kind is not None:
-                pacing.note_failure(kind)
-                self._persist_pacing(pacing)
-                self._logger.warning("记录风控信号 %s（后续退避已生效）", kind)
-            raise
+                waited = await pacing.acquire(budget_ms=budget_ms, model_name=model_name)
+            except DeepEtherError as exc:
+                # 额度用完 / 冷却中：换下一个账号（不等待、也不在同一个账号上重试）
+                last_error = exc
+                continue
+            if waited > 0:
+                self._logger.info("节奏控制：等待 %.1f 秒后调用上游（账号 %s）", waited, account)
 
-        self._circuit.record_success()
-        pacing.note_success()
-        self._persist_pacing(pacing)
-        elapsed_ms = int((time.monotonic() - started) * 1000)
-        self._state().record_success(elapsed_ms)
-        self._state().record_probe(True, "最近一次调用成功")
-        self._logger.info(
-            "网页版调用成功：耗时 %d ms，正文 %d 字 / 思考 %d 字，上下文 %d 条（丢弃 %d 条）",
-            elapsed_ms,
-            len(snapshot.content),
-            len(snapshot.thinking),
-            len(rendered.messages),
-            rendered.dropped_items,
+            try:
+                async with self._gate:
+                    snapshot = await self._call_web(
+                        config, rendered, request, budget_ms, self._ensure_client(token)
+                    )
+            except DeepEtherError as exc:
+                # 排队超预算 = 本地容量不足，不能算作熔断器的"上游连续失败"。
+                if exc.code != ErrorCode.CONCURRENCY_REJECTED:
+                    circuit.record_failure()
+                try:
+                    kind = classify_failure(
+                        status=getattr(exc, "status", None),
+                        code=exc.code,
+                        message=exc.message,
+                        body=exc.detail,
+                    )
+                except Exception:  # noqa: BLE001 - 分类失败不应放大成请求失败
+                    kind = None
+                if kind is not None:
+                    pacing.note_failure(kind)
+                    self._persist_pacing(pacing, account)
+                    self._logger.warning("记录风控信号 %s（账号 %s，后续退避已生效）", kind, account)
+                if exc.code == ErrorCode.CREDENTIAL_INVALID and len(tokens) > 1:
+                    # 某个账号的 token 失效：只标记它，换下一个账号继续
+                    self._mark_credential_invalid(exc.message, account)
+                    last_error = exc
+                    continue
+                raise
+
+            circuit.record_success()
+            pacing.note_success()
+            self._persist_pacing(pacing, account)
+            self._last_used[account] = time.monotonic()
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            self._state().record_success(elapsed_ms)
+            self._state().record_probe(True, "最近一次调用成功")
+            self._logger.info(
+                "网页版调用成功：耗时 %d ms，正文 %d 字 / 思考 %d 字，上下文 %d 条（丢弃 %d 条，账号 %s）",
+                elapsed_ms,
+                len(snapshot.content),
+                len(snapshot.thinking),
+                len(rendered.messages),
+                rendered.dropped_items,
+                account,
+            )
+            return self._build_web_response(config, snapshot, rendered, elapsed_ms)
+
+        if last_error is not None:
+            raise last_error
+        raise DeepEtherError(
+            ErrorCode.CREDENTIAL_MISSING,
+            "没有可用的网页版账号（全部在冷却或熔断中）",
         )
-        return self._build_web_response(config, snapshot, rendered, elapsed_ms)
 
     async def _call_web(
         self,
@@ -422,16 +685,16 @@ class DeepEtherProvider(LLMProviderBase):
         rendered: RenderedContext,
         request: dict[str, Any],
         budget_ms: int,
+        client: WebUpstreamClient,
     ) -> Any:
-        """建会话 + 求解 PoW + 读完 SSE。"""
+        """建会话 + 求解 PoW + 读完 SSE（使用指定账号的客户端）。"""
 
         timeout_sec = float(config.behavior.request_timeout_sec)
         if budget_ms > 0:
             timeout_sec = max(5.0, min(timeout_sec, budget_ms / 1000.0))
-        client = self._ensure_client()
         antiban = _antiban_section(config)
         reuse_calls = int(getattr(antiban, "session_reuse_calls", _DEFAULT_SESSION_REUSE_CALLS))
-        # 复用同一个会话（而不是每轮新建）：既是降低封禁风险的措施（docs/ANTIBAN.md 措施 4），
+        # 复用同一个会话（而不是每轮新建）：既是降低封禁风险的措施（docs/design/ANTIBAN.md 措施 4），
         # 也省掉每轮一次 chat_session/create 往返。
         session_id = await client.acquire_session(reuse_limit=reuse_calls)
         try:

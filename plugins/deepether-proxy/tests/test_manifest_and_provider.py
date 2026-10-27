@@ -51,8 +51,8 @@ def test_manifest_only_declares_text_capability_and_current_version():
     capabilities = raw["capabilities"]
     assert capabilities == ["send.text"]
     assert "llm.generate" not in capabilities
-    assert raw["version"] == module.PROVIDER_VERSION == "0.3.1"
-    assert raw["llm_providers"][0]["version"] == module.PROVIDER_VERSION
+    assert raw["version"] == module.PROVIDER_VERSION == "0.5.0"
+    assert {item["version"] for item in raw["llm_providers"]} == {module.PROVIDER_VERSION}
 
 
 def test_decorator_matches_manifest():
@@ -64,7 +64,7 @@ def test_decorator_matches_manifest():
 
     declared = {item["client_type"] for item in raw["llm_providers"]}
     collected = {item["client_type"] for item in plugin.get_llm_providers()}
-    assert declared == collected == {"com.ether.deepether"}
+    assert declared == collected == {"com.ether.deepether", "com.ether.commandcode"}
 
 
 def test_plugin_implements_lifecycle():
@@ -86,9 +86,136 @@ def test_config_model_generates_defaults():
     module = _load_plugin_module()
     plugin_class = module.DeepEtherProxyPlugin
     defaults = plugin_class.build_default_config()
-    assert defaults["plugin"]["config_version"] == "0.2.0"
+    assert defaults["plugin"]["config_version"] == "0.5.0"
+    assert defaults["antiban"]["max_per_day"] == 400
     assert defaults["plugin"]["enabled"] is True
     assert defaults["behavior"]["mode"] == "web_first"
     assert defaults["concurrency"]["max_concurrency"] <= 3
     assert "fallback" not in defaults  # FallbackConfig 已随 0.3.0 删除
     assert defaults["behavior"]["prompt_style"] in ("plain", "replyer", "raw")
+    # 0.4.0：CommandCode 通道默认只注册模型、不接线
+    assert defaults["commandcode"] == {"api_key": ""}
+    assert defaults["commandcode"]["api_key"] == ""
+
+def test_replyer_hook_rewrites_model_when_capacity_exhausted():
+    """额度不够时，hook 把本轮 model_name 改成官方模型（零失败切换的关键）。"""
+
+    import asyncio
+
+    module = _load_plugin_module()
+    plugin = module.DeepEtherProxyPlugin()
+
+    class StubProvider:
+        def __init__(self) -> None:
+            self.noted: list[str] = []
+
+        def first_replyer_model(self):
+            return ("deepether-replyer", "deepether")
+
+        def replyer_yield_target(self) -> str:
+            return "deepseek-v4-flash"
+
+        def note_yield(self, target: str) -> None:
+            self.noted.append(target)
+
+    plugin._provider = StubProvider()  # noqa: SLF001
+    result = asyncio.run(
+        plugin.handle_replyer_before_request(model_name="deepether-replyer", task_name="replyer")
+    )
+    assert result["action"] == "continue"
+    assert result["modified_kwargs"]["model_name"] == "deepseek-v4-flash"
+    assert result["modified_kwargs"]["task_name"] == "replyer"
+    assert plugin._provider.noted == ["deepseek-v4-flash"]  # noqa: SLF001
+
+
+def test_replyer_hook_keeps_params_when_capacity_ok():
+    import asyncio
+
+    module = _load_plugin_module()
+    plugin = module.DeepEtherProxyPlugin()
+
+    class StubProvider:
+        def first_replyer_model(self):
+            return ("deepether-replyer", "deepether")
+
+        def replyer_yield_target(self) -> None:
+            return None
+
+        def note_yield(self, target: str) -> None:  # pragma: no cover - 不应被调用
+            raise AssertionError("有容量时不应记录让位")
+
+    plugin._provider = StubProvider()  # noqa: SLF001
+    result = asyncio.run(plugin.handle_replyer_before_request(model_name="deepether-replyer"))
+    assert result["modified_kwargs"]["model_name"] == "deepether-replyer"
+
+
+def test_replyer_hook_never_raises():
+    """hook 内部异常必须被吞掉并原样放行，不能打断回复。"""
+
+    import asyncio
+
+    module = _load_plugin_module()
+    plugin = module.DeepEtherProxyPlugin()
+
+    class BrokenProvider:
+        def replyer_yield_target(self) -> str:
+            raise RuntimeError("boom")
+
+    plugin._provider = BrokenProvider()  # noqa: SLF001
+    result = asyncio.run(plugin.handle_replyer_before_request(model_name="deepether-replyer"))
+    assert result == {"action": "continue", "modified_kwargs": {"model_name": "deepether-replyer"}}
+
+def test_replyer_hook_covers_commandcode_budget():
+    """replyer 用 cc-* 模型时，预算耗尽同样应该让位到官方模型。"""
+
+    import asyncio
+
+    module = _load_plugin_module()
+    plugin = module.DeepEtherProxyPlugin()
+
+    class StubProvider:
+        def __init__(self) -> None:
+            self.noted: list[str] = []
+
+        def first_replyer_model(self):
+            return ("cc-kimi-k3", "commandcode")
+
+        def next_official_model(self) -> str:
+            return "deepseek-v4-flash"
+
+        def note_yield(self, target: str) -> None:
+            self.noted.append(target)
+
+    class StubCc:
+        def capacity_block_reason(self) -> str:
+            return "CommandCode 预算已用尽（剩余 $0.00）"
+
+    plugin._provider = StubProvider()  # noqa: SLF001
+    plugin._cc_provider = StubCc()  # noqa: SLF001
+    result = asyncio.run(plugin.handle_replyer_before_request(model_name=""))
+
+    assert result["modified_kwargs"]["model_name"] == "deepseek-v4-flash"
+    assert plugin._provider.noted == ["deepseek-v4-flash"]  # noqa: SLF001
+
+
+def test_replyer_hook_ignores_commandcode_when_budget_ok():
+    import asyncio
+
+    module = _load_plugin_module()
+    plugin = module.DeepEtherProxyPlugin()
+
+    class StubProvider:
+        def first_replyer_model(self):
+            return ("cc-kimi-k3", "commandcode")
+
+        def next_official_model(self) -> str:  # pragma: no cover
+            raise AssertionError("预算充足时不应改写")
+
+    class StubCc:
+        def capacity_block_reason(self) -> None:
+            return None
+
+    plugin._provider = StubProvider()  # noqa: SLF001
+    plugin._cc_provider = StubCc()  # noqa: SLF001
+    result = asyncio.run(plugin.handle_replyer_before_request(model_name=""))
+    assert "model_name" not in result["modified_kwargs"] or result["modified_kwargs"]["model_name"] == ""

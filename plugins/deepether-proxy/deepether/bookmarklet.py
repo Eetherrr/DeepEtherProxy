@@ -21,7 +21,7 @@ _TEMPLATE: Final[str] = (
     "}catch(err){"
     "var raw2=localStorage.getItem('userToken');"
     "var tok2=raw2?((JSON.parse(raw2)||{}).value||raw2):'';"
-    "prompt('DeepEther Proxy：自动送达失败（'+err+'）。请复制下面的 token，粘贴到插件配置 credential.web_token：',tok2)"
+    "prompt('DeepEther Proxy：自动送达失败（'+err+'）。请复制下面的 token，粘贴到插件配置 credential.web_tokens：',tok2)"
     "}})()"
 )
 

@@ -49,6 +49,14 @@ class ErrorCode:
     CHANNEL_DISABLED: Final[str] = "channel_disabled"
     NOT_SUPPORTED: Final[str] = "not_supported"
     INTERNAL: Final[str] = "internal"
+    # ─── CommandCode 通道 ───────────────────────────────────────────────
+    MODEL_NOT_ALLOWED: Final[str] = "model_not_allowed"
+    PLAN_NOT_SUPPORTED: Final[str] = "plan_not_supported"
+    UPSTREAM_BLOCKED: Final[str] = "upstream_blocked"
+    CONTEXT_TOO_LONG: Final[str] = "context_too_long"
+    REQUEST_TOO_LARGE: Final[str] = "request_too_large"
+    BUDGET_EXHAUSTED: Final[str] = "budget_exhausted"
+    BILLING_PENDING: Final[str] = "billing_pending"
 
 
 class DeepEtherError(Exception):
@@ -59,9 +67,19 @@ class DeepEtherError(Exception):
         message: 面向用户的中文错误说明。
         retryable: 本次失败是否值得重试（用于熔断判定）。
         detail: 供日志使用的补充信息，不直接回给用户。
+        status: 上游 HTTP 状态码（有响应时填写）；反封禁分类要按它区分
+            "403 封禁 / 403 软限流 / 401 凭证过期"，只靠错误码分不出来。
     """
 
-    def __init__(self, code: str, message: str, *, retryable: bool = False, detail: str = "") -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        detail: str = "",
+        status: int | None = None,
+    ) -> None:
         """构造插件异常。
 
         Args:
@@ -69,6 +87,7 @@ class DeepEtherError(Exception):
             message: 面向用户的中文错误说明。
             retryable: 本次失败是否值得重试。
             detail: 供日志使用的补充信息。
+            status: 上游 HTTP 状态码（可空）。
         """
 
         super().__init__(message)
@@ -76,6 +95,7 @@ class DeepEtherError(Exception):
         self.message = message
         self.retryable = retryable
         self.detail = detail
+        self.status = status
 
     def __str__(self) -> str:
         """返回带错误码的中文描述。"""

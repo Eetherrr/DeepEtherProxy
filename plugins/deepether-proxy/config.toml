@@ -1,33 +1,27 @@
 [plugin]
 enabled = true
-config_version = "0.2.0"
+config_version = "0.5.0"
 
 [provision]
-# 插件加载时自动把 Provider 与三个预设模型写进 Host 的 config/model_config.toml，
-# 并把 deepether 模型接到任务 model_list 首位。Host 会热重载该文件，无需重启；写入前自动备份。
-# 服务商同时写入 max_retry = 1：模型失败一次就轮到下一个模型，不在同一模型上重试。
+# 插件加载时把 Provider 与两个预设模型注册进 Host 的 config/model_config.toml（只注册、不接线）。
+# 哪个任务用哪个模型，请在 WebUI 里自己选（与 CommandCode 通道一致）。
 enabled = true
 provider_name = "deepether"
 model_config_path = ""
-# 可选纯文本任务：replyer/utils/memory/mid_memory/fast_model/learner（可选项复用 deepether-utils 模型）。
-# planner 需要工具调用、emoji 需要视觉，写进去会被忽略并告警。
-wire_tasks = "replyer,utils"
-selection_strategy = "sequential"
 keep_backup = true
 
 [credential]
-# 发布用模板：留空。请在 WebUI 插件配置里填入自己的网页版 token（chat.deepseek.com 控制台
-# 执行 copy(JSON.parse(localStorage.getItem('userToken')).value) 获取），不要把真实 token 提交进仓库。
-web_token = ""
+# 网页版登录 token，可以填多个（数组）。获取方法：登录 chat.deepseek.com 后按 F12，
+# 控制台执行 copy(JSON.parse(localStorage.getItem('userToken')).value) 复制粘贴。
+# 多个 token 会在「不在冷却中」的账号之间轮换；只填一个就是单账号行为。
+web_tokens = []
 loopback_enabled = false
 credential_port = 18765
 allowed_origin = "https://chat.deepseek.com"
-health_check_interval_min = 30
+health_check_interval_min = 60
 
 [behavior]
-# web_first：正常接管网页版（自动注册把 deepether 模型接到任务 model_list 首位）。
-# official_only：不接管网页版，自动注册把 deepether 模型移出任务 model_list。
-# web_only：已废弃，等同 web_first。
+# web_first：正常接管网页版；official_only：不接管（请求直接失败，由 Host 走其它模型）
 mode = "web_first"
 thinking_enabled = true
 search_enabled = false
@@ -36,7 +30,6 @@ request_timeout_sec = 180
 max_history_chars = 60000
 response_protocol = "legacy"
 prompt_style = "plain"
-
 [concurrency]
 max_concurrency = 2
 queue_wait_sec = 8
@@ -45,17 +38,39 @@ circuit_cooldown_sec = 60
 
 [antiban]
 enabled = true
+# 节奏：同一账号串行，两次请求间隔在最小~最大之间随机抖动（固定间隔反而更容易被周期性检测）
 min_interval_sec = 8.0
 max_interval_sec = 20.0
 jitter_ratio = 0.25
+# 三级硬配额：分/时挡突发与爬坡，天是天花板（实际生效值还会被自适应预算压小）
 max_per_minute = 3
-max_per_hour = 30
-max_per_day = 200
+max_per_hour = 45
+max_per_day = 400
+# 命中风控后的冷却
 cooldown_on_rate_limit_sec = 900
 cooldown_on_ban_sec = 21600
 adaptive_backoff = true
-session_reuse_calls = 8
+# 自适应日预算（AIMD）：命中风控按 0.6 回撤，连续成功 100 次回补 0.1，下限见 min_adaptive_budget
+adaptive_budget = true
+min_adaptive_budget = 200
+# 分/时配额一时打满时，replyer 最多等多少秒（等窗口滑出）；0 表示不等待
+quota_wait_max_sec = 25.0
+# 夜间节律：深夜把分/时速率压到 1/4，避免 24 小时匀速不停；留空表示不启用
+quiet_hours = "01:00-07:00"
+quiet_hours_ratio = 0.25
+# 按模型配额（可选），例如 "deepether-utils=180"：给后台 utils 单独限流，避免它吃掉 replyer 的额度
+model_daily_limits = ""
+# 日预算最后 N 次保留给高优先级模型，保证回复始终有额度
+reserve_daily_budget = 60
+reserve_models = "deepether-replyer"
+# 同一个上游会话最多复用多少次再换新（每轮都新建会话是明显的机器特征）
+session_reuse_calls = 20
 persist_state = true
+
+[commandcode]
+# 只需要填一个 Key。其余参数（上游地址、超时、并发、预算上限、模型注册范围、视觉/工具策略）
+# 全部使用代码内默认值；留空表示不使用这条通道（不会注册 cc-* 模型）。
+api_key = ""
 
 [debug]
 dump_request = false

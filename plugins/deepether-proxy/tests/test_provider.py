@@ -359,3 +359,210 @@ def test_queue_rejection_does_not_open_circuit(tmp_path: Path):
     assert provider.gate_rejected == 1
     # 阈值=1：如果排队拒绝被计入失败，熔断器此刻必然是 open
     assert provider.circuit_state == "closed"
+
+def test_antiban_config_is_fully_mapped_to_pacing(tmp_path: Path):
+    """契约：AntibanConfig 的每个容量字段都必须真的映射进 PacingConfig。
+
+    这类"配置写了但没接上线"的漏接（例如只改了 config.py 却忘了 provider 的构造参数）
+    单测平时跑不出来，只有逐字段比对才能挡住。
+    """
+
+    config = DeepEtherProxyConfig()
+    antiban = config.antiban
+    antiban.max_per_minute = 4
+    antiban.max_per_hour = 51
+    antiban.max_per_day = 500
+    antiban.adaptive_budget = True
+    antiban.min_adaptive_budget = 210
+    antiban.quota_wait_max_sec = 17.0
+    antiban.quiet_hours = "02:00-06:00"
+    antiban.quiet_hours_ratio = 0.3
+    antiban.model_daily_limits = "deepether-utils=123"
+    antiban.reserve_daily_budget = 61
+    antiban.reserve_models = "deepether-replyer,deepether-other"
+
+    provider = DeepEtherProvider(FakePlugin(config, token="tok", tmp_path=tmp_path))
+    pacing = provider._ensure_pacing()  # noqa: SLF001 - 直接检查构造结果
+    mapped = pacing._config  # noqa: SLF001
+
+    assert mapped.max_per_minute == 4
+    assert mapped.max_per_hour == 51
+    assert mapped.max_per_day == 500
+    assert mapped.adaptive_budget is True
+    assert mapped.min_adaptive_budget == 210
+    assert mapped.quota_wait_max_sec == 17.0
+    assert mapped.quiet_hours == "02:00-06:00"
+    assert mapped.quiet_hours_ratio == 0.3
+    assert mapped.model_daily_limits == {"deepether-utils": 123}
+    assert mapped.reserve_daily_budget == 61
+    assert mapped.reserve_models == ("deepether-replyer", "deepether-other")
+
+
+def test_request_model_name_reads_host_model_info(tmp_path: Path):
+    """反封禁按模型名分级，模型名必须从 Host 请求里如实取到。"""
+
+    provider = DeepEtherProvider(FakePlugin(DeepEtherProxyConfig(), tmp_path=tmp_path))
+    assert provider._request_model_name({"model_info": {"name": "deepether-replyer"}}) == "deepether-replyer"
+    assert provider._request_model_name({"model_info": {"model_identifier": "deepwind"}}) == "deepwind"
+    assert provider._request_model_name({"model_info": {}}) == ""
+    assert provider._request_model_name({}) == ""
+
+# ─── 额度让位（0.5.0）：replyer hook 的判定与目标解析 ─────────────────────
+
+
+def _write_model_config(tmp_path: Path, *, replyer_list: list[str], extra_models: list[str] | None = None) -> Path:
+    """写一份最小 model_config.toml，并返回路径。"""
+
+    lines = []
+    models = ["deepseek-v4-flash", "deepether-replyer", "deepether-utils"] + list(extra_models or [])
+    providers = {"deepseek-v4-flash": "DeepSeek", "deepether-replyer": "deepether", "deepether-utils": "deepether"}
+    for name in models:
+        provider = providers.get(name, "DeepSeek")
+        lines.extend(
+            [
+                "[[models]]",
+                'model_type = "llm"',
+                f'model_identifier = "{name}"',
+                f'name = "{name}"',
+                f'api_provider = "{provider}"',
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "[model_task_config.replyer]",
+            "model_list = [" + ", ".join(f'"{item}"' for item in replyer_list) + "]",
+            "",
+        ]
+    )
+    path = tmp_path / "model_config.toml"
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def _yield_provider(tmp_path: Path, *, replyer_list: list[str], **config_overrides) -> DeepEtherProvider:
+    config = DeepEtherProxyConfig()
+    config.provision.model_config_path = str(_write_model_config(tmp_path, replyer_list=replyer_list))
+    for key, value in config_overrides.items():
+        section, _, field = key.partition(".")
+        setattr(getattr(config, section), field, value)
+    return DeepEtherProvider(FakePlugin(config, token="tok", tmp_path=tmp_path))
+
+
+def test_capacity_ok_returns_none(tmp_path: Path) -> None:
+    provider = _yield_provider(tmp_path, replyer_list=["deepether-replyer", "deepseek-v4-flash"])
+    assert provider.capacity_block_reason() is None
+    assert provider.replyer_yield_target() is None
+
+
+def test_capacity_reports_day_quota_exhausted(tmp_path: Path) -> None:
+    provider = _yield_provider(
+        tmp_path,
+        replyer_list=["deepether-replyer", "deepseek-v4-flash"],
+        **{"antiban.max_per_day": 1, "antiban.adaptive_budget": False},
+    )
+    pacing = provider._ensure_pacing()  # noqa: SLF001
+    asyncio.run(pacing.acquire(model_name="deepether-replyer"))
+
+    reason = provider.capacity_block_reason()
+    assert reason is not None and "日额度" in reason
+
+
+def test_yield_target_prefers_official_model_in_task_list(tmp_path: Path) -> None:
+    provider = _yield_provider(
+        tmp_path,
+        replyer_list=["deepether-replyer", "deepseek-v4-flash"],
+        **{"antiban.max_per_day": 1, "antiban.adaptive_budget": False},
+    )
+    asyncio.run(provider._ensure_pacing().acquire(model_name="deepether-replyer"))  # noqa: SLF001
+
+    assert provider.replyer_yield_target() == "deepseek-v4-flash"
+
+
+def test_yield_target_follows_task_model_list_order(tmp_path: Path) -> None:
+    """插件不持有兜底模型：返回的是你自己 model_list 里的第一个非本插件模型。"""
+
+    provider = _yield_provider(
+        tmp_path,
+        replyer_list=["deepseek-v4-flash", "deepether-replyer"],
+        **{"antiban.max_per_day": 1, "antiban.adaptive_budget": False},
+    )
+    asyncio.run(provider._ensure_pacing().acquire(model_name="deepether-replyer"))  # noqa: SLF001
+
+    assert provider.replyer_yield_target() == "deepseek-v4-flash"
+
+def test_yield_target_is_none_without_official_model(tmp_path: Path) -> None:
+    provider = _yield_provider(
+        tmp_path,
+        replyer_list=["deepether-replyer"],
+        **{"antiban.max_per_day": 1, "antiban.adaptive_budget": False},
+    )
+    asyncio.run(provider._ensure_pacing().acquire(model_name="deepether-replyer"))  # noqa: SLF001
+
+    assert provider.capacity_block_reason() is not None
+    assert provider.replyer_yield_target() is None
+
+# ─── 多账号池（0.5.0）：轮换与隔离 ───────────────────────────────────────
+
+
+def _pool_provider(tmp_path: Path, tokens: list[str], **overrides) -> DeepEtherProvider:
+    """构造一个多账号 provider（不触网：客户端由用例注入）。"""
+
+    config = DeepEtherProxyConfig()
+    config.credential.web_tokens = list(tokens)
+    config.antiban.max_per_day = 1
+    config.antiban.adaptive_budget = False
+    config.antiban.reserve_daily_budget = 0
+    config.provision.model_config_path = str(
+        _write_model_config(tmp_path, replyer_list=["deepether-replyer", "deepseek-v4-flash"])
+    )
+    for key, value in overrides.items():
+        section, _, field = key.partition(".")
+        setattr(getattr(config, section), field, value)
+    return DeepEtherProvider(FakePlugin(config, token=None, tmp_path=tmp_path))
+
+
+def test_rotation_uses_next_account_when_first_exhausted(tmp_path: Path) -> None:
+    tokens = ["token-account-a", "token-account-b"]
+    provider = _pool_provider(tmp_path, tokens)
+    account_a = provider._account_id(tokens[0])  # noqa: SLF001
+    account_b = provider._account_id(tokens[1])  # noqa: SLF001
+    fake_a, fake_b = FakeClient(), FakeClient()
+    provider._clients = {account_a: fake_a, account_b: fake_b}  # noqa: SLF001
+
+    # 把 A 的日额度用掉（max_per_day=1）
+    asyncio.run(provider._ensure_pacing(account_a).acquire(model_name="deepether-replyer"))  # noqa: SLF001
+
+    result = asyncio.run(provider.get_response(_request()))
+
+    assert result["content"] == "网页回复"
+    assert fake_a.complete_calls == []
+    assert len(fake_b.complete_calls) == 1
+
+
+def test_all_accounts_exhausted_raises_quota(tmp_path: Path) -> None:
+    tokens = ["token-account-a", "token-account-b"]
+    provider = _pool_provider(tmp_path, tokens)
+    provider._clients = {  # noqa: SLF001
+        provider._account_id(tokens[0]): FakeClient(),  # noqa: SLF001
+        provider._account_id(tokens[1]): FakeClient(),  # noqa: SLF001
+    }
+    for token in tokens:
+        asyncio.run(provider._ensure_pacing(provider._account_id(token)).acquire())  # noqa: SLF001
+
+    with pytest.raises(DeepEtherError) as excinfo:
+        asyncio.run(provider.get_response(_request()))
+    assert excinfo.value.code == "pacing_quota"
+
+
+def test_capacity_is_ok_when_any_account_has_room(tmp_path: Path) -> None:
+    tokens = ["token-account-a", "token-account-b"]
+    provider = _pool_provider(tmp_path, tokens)
+    account_a = provider._account_id(tokens[0])  # noqa: SLF001
+    asyncio.run(provider._ensure_pacing(account_a).acquire())  # noqa: SLF001
+
+    assert provider.capacity_block_reason() is None
+
+    account_b = provider._account_id(tokens[1])  # noqa: SLF001
+    asyncio.run(provider._ensure_pacing(account_b).acquire())  # noqa: SLF001
+    assert provider.capacity_block_reason() is not None
