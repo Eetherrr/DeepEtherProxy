@@ -66,7 +66,8 @@ def iter_files(base: Path) -> list[Path]:
     """收集需要打包的文件（相对 PLUGIN_DIR 排序，保证产物可复现）。"""
 
     out: list[Path] = []
-    for path in sorted(PLUGIN_DIR.rglob("*")):
+    # 用 posix 字符串排序：Windows 的 Path 比较不看大小写，Linux 看，会导致两边顺序不同
+    for path in sorted(PLUGIN_DIR.rglob("*"), key=lambda item: item.relative_to(PLUGIN_DIR).as_posix()):
         if not path.is_file():
             continue
         rel = path.relative_to(PLUGIN_DIR)
@@ -98,6 +99,8 @@ def main() -> int:
             info = zipfile.ZipInfo(f"{ARC_ROOT}/{rel.as_posix()}", date_time=FIXED_ZIP_TIME)
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o644 << 16
+            # 固定 create_system，否则 Windows(0) 与 Linux(3) 打出的字节不同
+            info.create_system = 3
             zf.writestr(info, payload)
 
     data = target.read_bytes()
