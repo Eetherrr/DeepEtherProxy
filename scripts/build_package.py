@@ -31,6 +31,11 @@ EXCLUDE_SUFFIXES = {".pyc", ".pyo"}
 # 只在仓库里做开发用的文件，不打进安装包
 EXCLUDE_ROOT_FILES = {"pytest.ini"}
 
+# 文本类文件在打包时统一转成 LF，保证 Windows 开发机与 Linux CI 打出同一个包
+TEXT_SUFFIXES = {".py", ".md", ".json", ".toml", ".txt", ".ini", ".cfg", ".yaml", ".yml"}
+# 固定 zip 内时间戳，让产物可复现（不随 checkout 时间变化）
+FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
+
 
 def check_catalog() -> None:
     """校验 models_go.json 存在且与 models.md 解析结果一致。"""
@@ -87,7 +92,13 @@ def main() -> int:
     files = iter_files(PLUGIN_DIR)
     with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
         for rel in files:
-            zf.write(PLUGIN_DIR / rel, f"{ARC_ROOT}/{rel.as_posix()}")
+            payload = (PLUGIN_DIR / rel).read_bytes()
+            if rel.suffix.lower() in TEXT_SUFFIXES:
+                payload = payload.replace(b"\r\n", b"\n")
+            info = zipfile.ZipInfo(f"{ARC_ROOT}/{rel.as_posix()}", date_time=FIXED_ZIP_TIME)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o644 << 16
+            zf.writestr(info, payload)
 
     data = target.read_bytes()
     digest = hashlib.sha256(data).hexdigest().upper()
