@@ -28,6 +28,8 @@ CATALOG_JSON = PLUGIN_DIR / "deepether" / "commandcode" / "models_go.json"
 # 只排除"生成物"和"开发期文件"；tests 不打进包（Host 侧不执行，且体积可观）
 EXCLUDE_DIRS = {"__pycache__", ".pytest_cache", "tests", ".mypy_cache"}
 EXCLUDE_SUFFIXES = {".pyc", ".pyo"}
+# 只在仓库里做开发用的文件，不打进安装包
+EXCLUDE_ROOT_FILES = {"pytest.ini"}
 
 
 def check_catalog() -> None:
@@ -66,6 +68,8 @@ def iter_files(base: Path) -> list[Path]:
         if any(part in EXCLUDE_DIRS for part in rel.parts):
             continue
         if path.suffix in EXCLUDE_SUFFIXES:
+            continue
+        if len(rel.parts) == 1 and rel.name in EXCLUDE_ROOT_FILES:
             continue
         out.append(rel)
     return out
